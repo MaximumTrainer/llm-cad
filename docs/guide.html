@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>User Guide - cad-mcp</title>
+  <meta name="description" content="Complete user guide for cad-mcp: installation, configuration, tool reference, assembly design, AI mesh generation, and troubleshooting.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔩</text></svg>">
+</head>
+<body>
+
+<nav>
+  <a href="." class="logo">cad-mcp <span>v0.1</span></a>
+  <div class="nav-links">
+    <a href="index.html#features">Features</a>
+    <a href="index.html#tools">Tools</a>
+    <a href="guide.html">User Guide</a>
+    <a href="https://github.com/MaximumTrainer/llm-cad">GitHub</a>
+  </div>
+</nav>
+
+<div class="guide-content">
+
+<h1>User Guide</h1>
+<p class="lead">
+  Everything you need to install, configure, and use cad-mcp to design 3D models
+  with an LLM. From first install to multi-part assembly export.
+</p>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#installation">Installation</a></li>
+    <li><a href="#connecting">Connecting to an MCP Host</a></li>
+    <li><a href="#first-model">Your First Model</a></li>
+    <li><a href="#design-workflow">The Design Workflow</a></li>
+    <li><a href="#tool-reference">Tool Reference</a></li>
+    <li><a href="#assemblies">Multi-Part Assemblies</a></li>
+    <li><a href="#ai-mesh">AI Mesh Generation</a></li>
+    <li><a href="#http-transport">HTTP Transport</a></li>
+    <li><a href="#prompts-resources">Prompts &amp; Resources</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+  </ol>
+</div>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="installation">1. Installation</h2>
+
+<h3>Prerequisites</h3>
+<ul>
+  <li><strong>Python 3.11+</strong> &mdash; CadQuery requires 3.11 or newer</li>
+  <li><strong><a href="https://docs.astral.sh/uv/">uv</a></strong> &mdash; fast Python package manager</li>
+  <li><strong>An MCP host</strong> &mdash; Claude Code, Claude Desktop, Cursor, or any MCP client</li>
+</ul>
+
+<h3>Install from source</h3>
+<pre><code>git clone https://github.com/MaximumTrainer/llm-cad.git
+cd llm-cad
+uv sync</code></pre>
+
+<p>This installs all dependencies including CadQuery, trimesh, manifold3d, and the MCP SDK.</p>
+
+<h3>Verify the install</h3>
+<pre><code>uv run python scripts/smoke.py</code></pre>
+<p>The smoke test builds a bracket, renders it, validates the mesh, and exports to STL. If it completes without errors, everything is working.</p>
+
+<div class="callout">
+  <strong>Platform notes</strong>
+  CadQuery ships pre-built wheels for Python 3.10&ndash;3.13 on Linux x86_64,
+  macOS x86_64/arm64, and Windows x86_64. If <code>uv sync</code> fails with
+  "no matching distribution", check your Python version with <code>python --version</code>
+  and install a supported version via <code>uv python install 3.11</code>.
+</div>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="connecting">2. Connecting to an MCP Host</h2>
+
+<h3>Claude Code</h3>
+<p>From the repo directory, run:</p>
+<pre><code>claude mcp add cad-mcp -- uv run cad-mcp</code></pre>
+
+<p>Or add to your project's <code>.mcp.json</code>:</p>
+<pre><code>{
+  "mcpServers": {
+    "cad-mcp": {
+      "command": "uv",
+      "args": ["run", "--directory", "/absolute/path/to/llm-cad", "cad-mcp"]
+    }
+  }
+}</code></pre>
+
+<h3>Claude Desktop</h3>
+<p>Add to your <code>claude_desktop_config.json</code>:</p>
+<pre><code>{
+  "mcpServers": {
+    "cad-mcp": {
+      "command": "uv",
+      "args": ["run", "--directory", "/absolute/path/to/llm-cad", "cad-mcp"]
+    }
+  }
+}</code></pre>
+
+<h3>Any stdio MCP client</h3>
+<pre><code>uv run --directory /path/to/llm-cad cad-mcp</code></pre>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="first-model">3. Your First Model</h2>
+
+<p>Once cad-mcp is connected, ask your LLM to design something. Here's an example conversation:</p>
+
+<div class="callout">
+  <strong>You:</strong> Design a simple wall-mount bracket for a 30mm pipe with two M4 screw holes and 3mm walls.
+</div>
+
+<p>The LLM will:</p>
+<ol>
+  <li>Call <code>execute_cad</code> with CadQuery code to build the bracket</li>
+  <li>Call <code>render_views</code> to see a 4-view PNG preview</li>
+  <li>Critique the render and refine the code if needed</li>
+  <li>Call <code>measure</code> to verify the dimensions match your request</li>
+  <li>Call <code>validate_mesh</code> to check printability</li>
+  <li>Call <code>export_model</code> to save as STL, STEP, or other format</li>
+</ol>
+
+<p>The key insight: <strong>the LLM sees rendered images of what it built</strong>. This visual feedback loop lets it catch mistakes and iterate, just like a human designer.</p>
+
+<h3>Example CadQuery code</h3>
+<p>Under the hood, the LLM writes code like this:</p>
+<pre><code>import cadquery as cq
+
+result = (
+    cq.Workplane("XY")
+    .box(50, 30, 3)                    # base plate
+    .faces("&gt;Z").workplane()
+    .rect(40, 20, forConstruction=True)
+    .vertices().hole(4.5)              # M4 screw holes
+    .faces("&lt;Y").workplane()
+    .transformed(offset=(0, 1.5, 15))
+    .rect(50, 30).extrude(3)           # upright wall
+)</code></pre>
+
+<p>You never need to write this code yourself. The LLM writes it, and the server executes it safely in a sandbox.</p>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="design-workflow">4. The Design Workflow</h2>
+
+<p>The server ships a <code>design_workflow</code> prompt that teaches the LLM the correct loop. The steps are:</p>
+
+<ol>
+  <li><strong>Execute</strong> &mdash; Write CadQuery code and run it via <code>execute_cad</code></li>
+  <li><strong>Render</strong> &mdash; Always call <code>render_views</code> after every execute to see the result</li>
+  <li><strong>Critique</strong> &mdash; Examine the render and identify issues (wrong dimensions, missing features, visual problems)</li>
+  <li><strong>Revise</strong> &mdash; Fix the code and re-execute if needed</li>
+  <li><strong>Measure</strong> &mdash; Call <code>measure</code> to numerically verify dimensions</li>
+  <li><strong>Validate</strong> &mdash; Call <code>validate_mesh</code> to check printability</li>
+  <li><strong>Export</strong> &mdash; Call <code>export_model</code> to save the final model</li>
+</ol>
+
+<div class="callout warning">
+  <strong>Important</strong>
+  The LLM must render after every execute. Without visual feedback, it can't tell
+  if the geometry is correct. This is the core principle of cad-mcp.
+</div>
+
+<h3>Code modes</h3>
+<p><code>execute_cad</code> supports two modes:</p>
+<ul>
+  <li><strong>replace</strong> (default) &mdash; Replaces all code. Use for starting fresh or major changes.</li>
+  <li><strong>append</strong> &mdash; Adds new code to the end of the history. Use for incremental modifications like adding holes, fillets, or cuts to an existing shape.</li>
+</ul>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="tool-reference">5. Tool Reference</h2>
+
+<h3><code>execute_cad</code></h3>
+<p>Runs CadQuery Python code in a sandboxed subprocess. The code must assign its final shape to a variable named <code>result</code>.</p>
+<ul>
+  <li><strong>code</strong> (string, required) &mdash; CadQuery Python code</li>
+  <li><strong>mode</strong> (<code>"replace"</code> | <code>"append"</code>) &mdash; Replace all code or append to history</li>
+</ul>
+<p>Returns: solid count, bounding box dimensions, or a structured error with line number and hint.</p>
+
+<h3><code>render_views</code></h3>
+<p>Renders a multi-angle PNG preview of the model. Returns the image as MCP ImageContent (base64 PNG) that the LLM can see inline.</p>
+<ul>
+  <li><strong>views</strong> (list) &mdash; Which views to render. Default: <code>["front", "right", "top", "iso"]</code></li>
+  <li><strong>width</strong>, <strong>height</strong> (int) &mdash; Image dimensions. Default: 800x600</li>
+  <li><strong>parts</strong> (list, optional) &mdash; Filter to specific parts in an assembly</li>
+</ul>
+
+<h3><code>validate_mesh</code></h3>
+<p>Checks mesh quality and printability.</p>
+<ul>
+  <li><strong>min_wall_mm</strong> (float) &mdash; Minimum wall thickness. Default: 1.2</li>
+  <li><strong>max_overhang_deg</strong> (float) &mdash; Maximum overhang angle. Default: 45</li>
+  <li><strong>part</strong> (string, optional) &mdash; Validate a specific part</li>
+</ul>
+<p>Returns: watertight status, manifold check, wall thickness violations, overhang report, volume, estimated PLA mass, and assembly interference warnings.</p>
+
+<h3><code>measure</code></h3>
+<p>Takes numeric measurements on the model.</p>
+<ul>
+  <li><strong>what</strong> &mdash; One of:
+    <ul>
+      <li><code>"bbox"</code> &mdash; Bounding box dimensions (x, y, z in mm)</li>
+      <li><code>"volume"</code> &mdash; Volume in mm&sup3;</li>
+      <li><code>"faces"</code> &mdash; Number of B-rep faces</li>
+      <li><code>"distance"</code> &mdash; Distance between two faces (requires <code>from_selector</code> and <code>to_selector</code>)</li>
+      <li><code>"clearance"</code> &mdash; Minimum distance between two parts (requires <code>parts: ["a", "b"]</code>)</li>
+    </ul>
+  </li>
+</ul>
+
+<h3><code>export_model</code></h3>
+<p>Exports the model to a file.</p>
+<ul>
+  <li><strong>format</strong> &mdash; <code>"step"</code>, <code>"stl"</code>, <code>"3mf"</code>, or <code>"glb"</code></li>
+  <li><strong>filename</strong> (optional) &mdash; Base filename (extension added automatically)</li>
+  <li><strong>tolerance</strong> (float) &mdash; Tessellation tolerance for mesh formats. Default: 0.1 mm</li>
+  <li><strong>parts</strong> &mdash; <code>"all"</code> (default), <code>"active"</code>, or a list of part names</li>
+</ul>
+<p>For multi-part exports: produces one file per part plus a combined assembly file. STEP assembly export uses XCAF with named shapes.</p>
+
+<h3><code>gen_ai_mesh</code></h3>
+<p>Generates an organic 3D mesh via the Meshy API. Requires <code>MESHY_API_KEY</code> environment variable.</p>
+<ul>
+  <li><strong>prompt</strong> (string) &mdash; Text description of the shape to generate</li>
+  <li><strong>art_style</strong> &mdash; <code>"realistic"</code> or <code>"sculpture"</code></li>
+  <li><strong>refine</strong> (bool) &mdash; Run a refinement pass for higher quality (slower)</li>
+</ul>
+
+<h3><code>create_part</code> / <code>set_active_part</code> / <code>position_part</code> / <code>list_parts</code> / <code>delete_part</code></h3>
+<p>Assembly management tools. See <a href="#assemblies">Multi-Part Assemblies</a> below.</p>
+
+<h3><code>list_session</code> / <code>reset_session</code></h3>
+<p><code>list_session</code> shows current parts, code history, and export history. <code>reset_session</code> clears all state.</p>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="assemblies">6. Multi-Part Assemblies</h2>
+
+<p>cad-mcp supports designing models with multiple parts. Each part has its own code history, color, and position in the assembly.</p>
+
+<h3>Creating parts</h3>
+<p>Ask the LLM to create named parts:</p>
+<div class="callout">
+  <strong>You:</strong> Design a box with a lid. Make the box 60x40x30mm with 2mm walls, and a lid that fits on top with 0.3mm clearance.
+</div>
+
+<p>The LLM will call <code>create_part</code> for each piece (e.g., "box" and "lid"), use <code>set_active_part</code> to switch between them, and write CadQuery code for each.</p>
+
+<h3>Positioning</h3>
+<p><code>position_part</code> sets translation (mm) and rotation (degrees, Euler XYZ) for a part. Transforms are applied during render and export but not baked into the geometry, so you can reposition without re-executing code.</p>
+
+<h3>Colors</h3>
+<p>Parts are automatically assigned distinct colors (steel, blue, red, green, orange, purple) for easy identification in renders. Colors can be overridden via <code>create_part(color="blue")</code>.</p>
+
+<h3>Interference &amp; clearance</h3>
+<ul>
+  <li><code>validate_mesh</code> automatically checks all part pairs for interference (overlapping geometry).</li>
+  <li><code>measure(what="clearance", parts=["box", "lid"])</code> returns the minimum distance between two parts.</li>
+</ul>
+
+<h3>Exporting assemblies</h3>
+<p>When exporting multiple parts, <code>export_model</code> produces:</p>
+<ul>
+  <li>One file per part: <code>model_box.stl</code>, <code>model_lid.stl</code></li>
+  <li>One combined file: <code>model_assembly.stl</code></li>
+  <li>For STEP format: a single file with named shapes via XCAF</li>
+</ul>
+
+<h3>Limits</h3>
+<ul>
+  <li>Maximum 16 parts per assembly</li>
+  <li>Part names: lowercase, starts with a letter, max 32 characters (<code>[a-z][a-z0-9_]{0,31}</code>)</li>
+  <li>Backward compatible: sessions without <code>create_part</code> have an implicit "main" part and work exactly like single-part mode</li>
+</ul>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="ai-mesh">7. AI Mesh Generation</h2>
+
+<p>The <code>gen_ai_mesh</code> tool generates organic 3D shapes (figurines, characters, terrain) via the <a href="https://meshy.ai">Meshy</a> text-to-3D API.</p>
+
+<h3>Setup</h3>
+<p>Set your Meshy API key as an environment variable:</p>
+<pre><code>export MESHY_API_KEY=msy_your_key_here</code></pre>
+
+<h3>Usage</h3>
+<div class="callout">
+  <strong>You:</strong> Generate a chess pawn figurine and place it on a 25mm square base.
+</div>
+
+<p>The LLM will call <code>gen_ai_mesh</code> with the organic part, then use regular CadQuery via <code>execute_cad</code> for the parametric base, and combine them in an assembly.</p>
+
+<div class="callout warning">
+  <strong>Limitation</strong>
+  AI-generated meshes produce tessellated B-rep geometry, not NURBS surfaces.
+  Parametric operations like fillet and shell will fail on these shapes.
+  Use them as-is or boolean-combine with parametric parts.
+</div>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="http-transport">8. HTTP Transport</h2>
+
+<p>For remote clients, web UIs, or multi-tenant deployments, run the server over streamable HTTP:</p>
+
+<pre><code>uv run cad-mcp --transport http</code></pre>
+
+<h3>Configuration</h3>
+<table class="tools-table" style="display: table;">
+  <thead>
+    <tr><th>Environment Variable</th><th>Default</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>CAD_MCP_TRANSPORT</code></td><td><code>stdio</code></td><td><code>http</code> for streamable HTTP</td></tr>
+    <tr><td><code>CAD_MCP_HOST</code></td><td><code>127.0.0.1</code></td><td>Bind address</td></tr>
+    <tr><td><code>CAD_MCP_PORT</code></td><td><code>8000</code></td><td>Bind port</td></tr>
+    <tr><td><code>CAD_MCP_AUTH_TOKEN</code></td><td>(none)</td><td>Bearer token for auth</td></tr>
+    <tr><td><code>CAD_MCP_CORS_ORIGIN</code></td><td>(none)</td><td>Allowed CORS origin</td></tr>
+    <tr><td><code>CAD_MCP_ALLOWED_HOSTS</code></td><td>(none)</td><td>Comma-separated allowed hostnames</td></tr>
+    <tr><td><code>CAD_MCP_STATELESS</code></td><td><code>0</code></td><td><code>1</code> for stateless HTTP mode</td></tr>
+  </tbody>
+</table>
+
+<h3>Authentication</h3>
+<p>When <code>CAD_MCP_AUTH_TOKEN</code> is set, all MCP requests require <code>Authorization: Bearer &lt;token&gt;</code>. Requests without a valid token get HTTP 401. The health endpoint (<code>GET /health</code>) is always accessible without auth.</p>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="prompts-resources">9. Prompts &amp; Resources</h2>
+
+<h3>MCP Prompts</h3>
+<p>The server ships three prompts that the LLM can invoke to learn how to use the tools:</p>
+
+<ul>
+  <li><strong>design_workflow</strong> &mdash; The core design loop. Mandates rendering after every execute and self-critique before export.</li>
+  <li><strong>cadquery_primer</strong> &mdash; A CadQuery cheat sheet covering Workplane basics, extrude/cut, fillets (with failure modes), shell, hole patterns via polarArray, and booleans. Each section has a runnable snippet.</li>
+  <li><strong>printability_checklist</strong> &mdash; FDM printing guidelines: minimum wall thickness, overhang angles, bed adhesion tips, and tolerances for mating parts.</li>
+</ul>
+
+<h3>MCP Resources</h3>
+<ul>
+  <li><code>cad://session/current/code</code> &mdash; The full CadQuery source code of the current model. Useful for recovery after context loss.</li>
+  <li><code>cad://examples/{name}</code> &mdash; Curated example models the LLM can study. Available: bracket, enclosure, flange, pipe_clamp, phone_stand, threaded_cap, gear, desk_organizer.</li>
+</ul>
+
+<!-- ──────────────────────────────────────────── -->
+<h2 id="troubleshooting">10. Troubleshooting</h2>
+
+<h3>CadQuery / OCP installation</h3>
+
+<p><strong>pip/uv install fails with "no matching distribution"</strong></p>
+<p>CadQuery requires <code>cadquery-ocp</code>, which ships pre-built wheels for Python 3.10&ndash;3.13 on Linux x86_64, macOS x86_64/arm64, and Windows x86_64. If your platform isn't covered:</p>
+<pre><code># Check your Python version
+python --version
+
+# Use a supported version via uv
+uv python install 3.11
+uv sync</code></pre>
+
+<p><strong>macOS Apple Silicon &mdash; OCP build errors</strong></p>
+<p>cadquery-ocp wheels are available for arm64 since cadquery 2.4. If you still hit issues:</p>
+<pre><code># Ensure you're not running under Rosetta
+arch  # should print "arm64"
+
+# Use a clean venv
+uv sync --reinstall
+
+# Or install via conda-forge
+conda install -c conda-forge cadquery</code></pre>
+
+<p><strong>Segfault on exit (exit code 139/127)</strong></p>
+<p>OCP (OpenCascade) sometimes segfaults during Python interpreter shutdown. This is cosmetic &mdash; all output is correct before the crash. Safe to ignore in CI.</p>
+
+<h3>Rendering</h3>
+
+<p><strong>pyrender / EGL not available</strong></p>
+<p>The server automatically falls back to matplotlib 3D rendering when pyrender + EGL is unavailable (common on Windows, CI, and headless servers). The fallback produces correct multi-view images with axes and scale ticks.</p>
+
+<p>To enable the faster pyrender path on Linux:</p>
+<pre><code># Install EGL libraries (Ubuntu/Debian)
+sudo apt-get install libegl1-mesa-dev libgles2-mesa-dev
+
+# On headless servers without GPU, use Mesa's software renderer
+sudo apt-get install libosmesa6-dev
+export PYOPENGL_PLATFORM=osmesa</code></pre>
+
+<p><strong>Render takes &gt; 2 seconds</strong></p>
+<p>The first render pays a one-time matplotlib font cache initialization cost (~1&ndash;3s). Subsequent renders should be well under 2s.</p>
+
+<h3>Validation</h3>
+
+<p><strong>trimesh warns about rtree</strong></p>
+<p>The wall-thickness check uses scipy KDTree, not trimesh's ray casting, so rtree is not required. The warning is safe to ignore.</p>
+
+<p><strong>manifold3d API errors</strong></p>
+<p>This project requires manifold3d &ge; 3.5.2. The correct API is:</p>
+<pre><code>import manifold3d
+mesh = manifold3d.Mesh(vert_properties=verts_f32, tri_verts=faces_u32)
+m = manifold3d.Manifold(mesh)
+print(m.status())  # Error.NoError for valid manifold</code></pre>
+
+<h3>CI issues</h3>
+<p><strong>Tests pass but exit code is non-zero (139)</strong></p>
+<p>This is the OCP shutdown segfault. In CI, check pytest's output rather than the exit code:</p>
+<pre><code>uv run pytest -v 2>&amp;1 | tee test_output.txt; grep -q "passed" test_output.txt</code></pre>
+
+</div>
+
+<footer>
+  <p>
+    cad-mcp is open source.
+    <a href="https://github.com/MaximumTrainer/llm-cad">View on GitHub</a>
+    &middot;
+    <a href="index.html">Home</a>
+    &middot;
+    Python 3.11+ &middot; CadQuery &middot; MCP SDK
+  </p>
+</footer>
+
+</body>
+</html>

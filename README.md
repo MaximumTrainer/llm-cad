@@ -2,6 +2,8 @@
 
 MCP server that lets any LLM design 3D models from text descriptions using CadQuery.
 
+**[Documentation & User Guide](https://maximumtrainer.github.io/llm-cad/)** | **[GitHub](https://github.com/MaximumTrainer/llm-cad)**
+
 ## Quick start
 
 ```bash
@@ -9,7 +11,7 @@ MCP server that lets any LLM design 3D models from text descriptions using CadQu
 # https://docs.astral.sh/uv/getting-started/installation/
 
 # Clone and install
-git clone <repo-url> && cd cad-mcp
+git clone https://github.com/MaximumTrainer/llm-cad.git && cd llm-cad
 uv sync
 
 # Run the smoke test (builds a bracket, renders, validates, exports)

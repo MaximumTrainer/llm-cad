@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cad-mcp - Text to 3D Models via MCP</title>
+  <meta name="description" content="An MCP server that lets any LLM design precise 3D models from text descriptions using CadQuery. Sandboxed execution, multi-angle rendering, mesh validation, and STL/STEP/3MF/GLB export.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔩</text></svg>">
+</head>
+<body>
+
+<nav>
+  <a href="." class="logo">cad-mcp <span>v0.1</span></a>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#tools">Tools</a>
+    <a href="#quickstart">Quick Start</a>
+    <a href="guide.html">User Guide</a>
+    <a href="https://github.com/MaximumTrainer/llm-cad">GitHub</a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <h1>Text to <span class="highlight">3D Models</span></h1>
+  <p class="tagline">
+    An MCP server that lets any LLM design precise, parametric 3D models
+    from text descriptions. Write CadQuery code, see rendered previews,
+    iterate visually, and export print-ready files.
+  </p>
+  <div class="cta-row">
+    <a href="#quickstart" class="btn btn-primary">Get Started</a>
+    <a href="guide.html" class="btn btn-outline">Read the Guide</a>
+  </div>
+</section>
+
+<!-- Core loop -->
+<section>
+  <div class="container">
+    <h2>The Design Loop</h2>
+    <p class="section-sub">The LLM writes code, sees what it built, critiques the render, and iterates until correct.</p>
+
+    <div class="loop-diagram">
+      <div class="loop-step"><span class="icon">💬</span> Describe</div>
+      <span class="loop-arrow">&#8594;</span>
+      <div class="loop-step"><span class="icon">🖊️</span> Write CadQuery</div>
+      <span class="loop-arrow">&#8594;</span>
+      <div class="loop-step"><span class="icon">⚡</span> Execute</div>
+      <span class="loop-arrow">&#8594;</span>
+      <div class="loop-step"><span class="icon">📸</span> Render</div>
+      <span class="loop-arrow">&#8594;</span>
+      <div class="loop-step"><span class="icon">🔍</span> Critique</div>
+      <span class="loop-arrow">&#8594;</span>
+      <div class="loop-step"><span class="icon">📐</span> Measure</div>
+      <span class="loop-arrow">&#8594;</span>
+      <div class="loop-step"><span class="icon">✅</span> Validate</div>
+      <span class="loop-arrow">&#8594;</span>
+      <div class="loop-step"><span class="icon">📦</span> Export</div>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section id="features" style="background: var(--bg-alt);">
+  <div class="container">
+    <h2>Features</h2>
+    <p class="section-sub">Everything an LLM needs to go from text to print-ready 3D model.</p>
+
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="card-icon">🔒</div>
+        <h3>Sandboxed Execution</h3>
+        <p>CadQuery code runs in an isolated subprocess with 30-second timeout, no network access, and restricted imports. Safe by design.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="card-icon">📸</div>
+        <h3>Multi-Angle Rendering</h3>
+        <p>Four-view grid (front, right, top, isometric) with axis triad and mm scale ticks. Renders return as inline images the LLM can see and critique.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="card-icon">✅</div>
+        <h3>Print Validation</h3>
+        <p>Checks watertightness, manifold status, wall thickness, overhang angles, and estimates PLA mass. Catch issues before printing.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="card-icon">📦</div>
+        <h3>Multi-Format Export</h3>
+        <p>Export to STL, STEP, 3MF, and GLB. STEP preserves exact B-rep geometry. Assembly export writes named shapes via XCAF.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="card-icon">🧩</div>
+        <h3>Multi-Part Assembly</h3>
+        <p>Design assemblies with up to 16 named parts. Position, color, interference detection, and clearance measurement between parts.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="card-icon">🤖</div>
+        <h3>AI Mesh Generation</h3>
+        <p>Generate organic shapes (figurines, terrain) via the Meshy API, then combine with parametric CadQuery parts.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="card-icon">🌐</div>
+        <h3>Dual Transport</h3>
+        <p>Stdio for local hosts (Claude Code, Claude Desktop) and streamable HTTP for remote clients with bearer token auth and CORS.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="card-icon">📖</div>
+        <h3>Built-in Teaching</h3>
+        <p>Ships MCP prompts that teach the LLM how to use CadQuery, follow the design workflow, and check printability. No prior knowledge needed.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="card-icon">📐</div>
+        <h3>Precision Measurements</h3>
+        <p>Bounding box, volume, face count, face-to-face distance, and inter-part clearance. The LLM verifies its own dimensions.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Tools -->
+<section id="tools">
+  <div class="container">
+    <h2>Tools</h2>
+    <p class="section-sub">13 MCP tools the LLM calls to design, validate, and export models.</p>
+
+    <div style="overflow-x: auto;">
+      <table class="tools-table">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Description</th>
+            <th>Category</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>execute_cad</code></td>
+            <td>Run CadQuery Python code in a sandbox. Assign result to <code>result</code>.</td>
+            <td><span class="tag">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>render_views</code></td>
+            <td>Render multi-angle PNG preview (front, right, top, isometric).</td>
+            <td><span class="tag">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>validate_mesh</code></td>
+            <td>Check watertight, manifold, wall thickness, overhangs, PLA mass estimate.</td>
+            <td><span class="tag">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>measure</code></td>
+            <td>Numeric measurements: bounding box, volume, face count, distance, clearance.</td>
+            <td><span class="tag">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>export_model</code></td>
+            <td>Export to STL, STEP, 3MF, or GLB. Per-part and assembly modes.</td>
+            <td><span class="tag">Core</span></td>
+          </tr>
+          <tr>
+            <td><code>gen_ai_mesh</code></td>
+            <td>Generate organic 3D mesh via Meshy API (requires <code>MESHY_API_KEY</code>).</td>
+            <td><span class="tag">AI</span></td>
+          </tr>
+          <tr>
+            <td><code>create_part</code></td>
+            <td>Add a named part to the assembly.</td>
+            <td><span class="tag">Assembly</span></td>
+          </tr>
+          <tr>
+            <td><code>set_active_part</code></td>
+            <td>Switch which part <code>execute_cad</code> targets.</td>
+            <td><span class="tag">Assembly</span></td>
+          </tr>
+          <tr>
+            <td><code>position_part</code></td>
+            <td>Set translation (mm) and rotation (degrees) for a part.</td>
+            <td><span class="tag">Assembly</span></td>
+          </tr>
+          <tr>
+            <td><code>list_parts</code></td>
+            <td>Overview of all parts: name, color, position, bounding box.</td>
+            <td><span class="tag">Assembly</span></td>
+          </tr>
+          <tr>
+            <td><code>delete_part</code></td>
+            <td>Remove a part from the assembly.</td>
+            <td><span class="tag">Assembly</span></td>
+          </tr>
+          <tr>
+            <td><code>list_session</code></td>
+            <td>Show parts, code history, and exports for the current session.</td>
+            <td><span class="tag">Session</span></td>
+          </tr>
+          <tr>
+            <td><code>reset_session</code></td>
+            <td>Clear all state and start fresh.</td>
+            <td><span class="tag">Session</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- Prompts & Resources -->
+<section style="background: var(--bg-alt);">
+  <div class="container">
+    <h2>Prompts &amp; Resources</h2>
+    <p class="section-sub">Built-in content that teaches the LLM how to succeed.</p>
+
+    <div class="features-grid">
+      <div class="feature-card">
+        <h3>Prompts</h3>
+        <ul style="color: var(--text-muted); font-size: 0.95rem; padding-left: 1.25rem;">
+          <li><strong>design_workflow</strong> &mdash; Step-by-step loop: execute, render, critique, measure, validate, export</li>
+          <li><strong>cadquery_primer</strong> &mdash; CadQuery cheat sheet with runnable snippets</li>
+          <li><strong>printability_checklist</strong> &mdash; FDM printing guidelines: walls, overhangs, tolerances</li>
+        </ul>
+      </div>
+      <div class="feature-card">
+        <h3>Resources</h3>
+        <ul style="color: var(--text-muted); font-size: 0.95rem; padding-left: 1.25rem;">
+          <li><code>cad://session/current/code</code> &mdash; Current model source code</li>
+          <li><code>cad://examples/{name}</code> &mdash; Curated examples: bracket, enclosure, flange, pipe_clamp, phone_stand, threaded_cap, gear, desk_organizer</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Quick Start -->
+<section id="quickstart">
+  <div class="container">
+    <h2>Quick Start</h2>
+    <p class="section-sub">Up and running in under 5 minutes.</p>
+
+    <div class="quickstart">
+      <h3>1. Install</h3>
+<pre><code>git clone https://github.com/MaximumTrainer/llm-cad.git &amp;&amp; cd llm-cad
+uv sync</code></pre>
+
+      <h3>2. Connect to Claude Code</h3>
+<pre><code>claude mcp add cad-mcp -- uv run cad-mcp</code></pre>
+
+      <h3>3. Connect to Claude Desktop</h3>
+      <p>Add to your <code>claude_desktop_config.json</code>:</p>
+<pre><code>{
+  "mcpServers": {
+    "cad-mcp": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/llm-cad", "cad-mcp"]
+    }
+  }
+}</code></pre>
+
+      <h3>4. Run the smoke test</h3>
+<pre><code>uv run python scripts/smoke.py</code></pre>
+
+      <p style="margin-top: 1.5rem;">
+        <a href="guide.html" class="btn btn-primary" style="font-size: 0.9rem;">Full User Guide &rarr;</a>
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Compatibility -->
+<section style="background: var(--bg-alt);">
+  <div class="container">
+    <h2>Compatibility</h2>
+    <p class="section-sub">Works with any MCP-capable client.</p>
+
+    <div class="features-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+      <div class="feature-card" style="text-align: center;">
+        <div class="card-icon">💻</div>
+        <h3>Claude Code</h3>
+        <p>CLI &amp; desktop app</p>
+      </div>
+      <div class="feature-card" style="text-align: center;">
+        <div class="card-icon">🖥️</div>
+        <h3>Claude Desktop</h3>
+        <p>Native Mac &amp; Windows</p>
+      </div>
+      <div class="feature-card" style="text-align: center;">
+        <div class="card-icon">✏️</div>
+        <h3>Cursor</h3>
+        <p>AI code editor</p>
+      </div>
+      <div class="feature-card" style="text-align: center;">
+        <div class="card-icon">🔧</div>
+        <h3>Any MCP Client</h3>
+        <p>Stdio or HTTP</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>
+    cad-mcp is open source.
+    <a href="https://github.com/MaximumTrainer/llm-cad">View on GitHub</a>
+    &middot;
+    <a href="guide.html">User Guide</a>
+    &middot;
+    Python 3.11+ &middot; CadQuery &middot; MCP SDK
+  </p>
+</footer>
+
+</body>
+</html>
