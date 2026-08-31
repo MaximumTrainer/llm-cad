@@ -38,14 +38,32 @@ How to use: work one phase per Claude Code session. Paste the phase prompt, let 
 
 **Gate:** all four SPEC acceptance criteria pass; smoke script green in CI.
 
-## Phase 6 (v2, optional)
-Streamable HTTP transport with auth → `gen_ai_mesh` behind `MESHY_API_KEY` → assembly support. Spec each in SPEC.md §10 before building.
+## Phase 6a — Streamable HTTP transport with auth (SPEC 10.1, ~half day)
+**Prompt:**
+> Implement streamable HTTP transport per SPEC 10.1. Add `--transport http` CLI flag and env-var config (`CAD_MCP_HOST`, `CAD_MCP_PORT`, `CAD_MCP_AUTH_TOKEN`). Bearer token auth via SDK `TokenVerifier`. Health endpoint at `GET /health`. CORS support via `CAD_MCP_CORS_ORIGIN`. Stdio remains the default. Add `transport.py` for config; update `server.py` main(). Tests: server starts on HTTP, tool call succeeds over HTTP, 401 without token when token is set, health endpoint responds without auth.
+
+**Gate:** `curl http://localhost:8000/health` returns 200; MCP client connects over HTTP and calls `ping`; unauthorized request returns 401; stdio mode unaffected.
+
+## Phase 6b — `gen_ai_mesh` tool (SPEC 10.2, ~half day)
+**Prompt:**
+> Implement `gen_ai_mesh` per SPEC 10.2. Add `meshy.py` (async httpx client: create task, poll, download GLB) and `tools/gen_ai_mesh.py`. Preview mode with 3s poll / 120s timeout. Optional refine mode (180s timeout). Download GLB to session tmpdir, convert mesh to OCP compound shape, store as session BREP. Return JSON summary + thumbnail. When `MESHY_API_KEY` is unset, return structured missing-key error. Add `httpx>=0.28` to deps. Mock tests for poll loop, timeout, error paths. Live integration test gated on `MESHY_API_KEY` env var.
+
+**Gate:** with live key, `gen_ai_mesh(prompt="a simple chess pawn")` produces a shape that `render_views` renders and `export_model` exports; without key, returns missing-key error; mock tests cover poll loop, 429 handling, and timeout.
+
+## Phase 6c — Assembly support (SPEC 10.3, ~1 day)
+**Prompt:**
+> Implement assembly support per SPEC 10.3. Update `session.py` with `Part` dataclass (name, code_history, brep_path, color, position) and assembly state. Add tools: `create_part`, `set_active_part`, `position_part`, `list_parts`, `delete_part`. Modify `execute_cad` to target active part, `render_views` to compose all parts with distinct colors, `validate_mesh` to add interference check, `measure` to add `clearance` mode, `export_model` to produce per-part + combined files (XCAF for STEP). Backward compatible: sessions without `create_part` behave as v1 (implicit "main" part). Max 16 parts.
+
+**Gate:** create box + lid, position lid above, render shows both colored, export produces 3 STLs, validate flags interference when overlapping, clearance returns 0 when touching and >0 when separated; all v1 tests still pass.
 
 ## Risk register
 - **OCP/cadquery install pain** (heaviest dependency, platform-sensitive): pin exact versions in Phase 0; document conda fallback. Mitigate first — it's the most likely Day-1 blocker.
 - **EGL on headless Linux**: keep the matplotlib fallback honest — test it in CI where EGL is absent.
 - **LLM writes valid-but-wrong geometry**: this is why render + measure exist; the workflow prompt must force self-critique, not optional.
 - **stdout corruption**: any stray `print` in server code breaks stdio MCP framing. Lint rule: no print outside the sandbox subprocess.
+- **Meshy API availability/cost** (v2): API calls cost credits; generation takes 15-120s. Mock everything in unit tests; gate live integration tests on `MESHY_API_KEY` env var. Handle 429 gracefully.
+- **Mesh-to-BREP fidelity** (v2): converting a triangle mesh to an OCP compound produces a tessellated B-rep, not NURBS. Fillets/shells on imported meshes will fail. Document this limitation; the workflow prompt should warn the LLM not to attempt parametric ops on AI-generated meshes.
+- **Assembly complexity** (v2): 16 parts x render/validate = multiplicative cost. Cap part count and warn the LLM when approaching the limit.
 
 ## Connecting the finished server
 Claude Code (project scope): `claude mcp add cad-mcp -- uv run cad-mcp` from the repo, or add to `.mcp.json`. For other hosts, use the equivalent stdio command config. Current syntax: https://docs.claude.com/en/docs/claude-code/mcp

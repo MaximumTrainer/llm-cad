@@ -13,9 +13,9 @@ LLMs are bad at emitting mesh data directly but excellent at writing code. This 
 
 ## 3. Non-goals (v1)
 - No GUI/viewer app (hosts render the returned images).
-- No multi-user server deployment (single-user stdio; HTTP transport is v2).
-- No assemblies/constraints solver (single-part focus; boolean ops OK).
-- No AI mesh generation in v1 (`gen_ai_mesh` is a v2 optional tool behind an API key).
+- No multi-user server deployment (single-user stdio; HTTP transport added in v2, see 10.1).
+- No constraints solver (assembly positioning is manual via `position_part`; see 10.3).
+- No AI mesh generation in v1 (`gen_ai_mesh` added in v2, see 10.2).
 
 ## 4. Users and hosts
 - Primary: a developer connecting the server to Claude Code / Claude Desktop / any MCP client config.
@@ -53,20 +53,21 @@ LLMs are bad at emitting mesh data directly but excellent at writing code. This 
 
 ## 7. Architecture
 ```
-Host LLM ── MCP (stdio) ── server.py (FastMCP)
-                              │
-              ┌───────────────┼───────────────────┐
-        tools/*.py       session.py          prompts/, resources/
-              │          (state: code history,
-        sandbox.py        current shape, tmpdir)
-        (subprocess:
-         cadquery exec)
-              │
-        render.py (tessellate → pyrender/EGL → PNG grid)
-        validate.py (trimesh + manifold3d)
-        export.py (STEP via OCP, STL/3MF/GLB via tessellation)
+Host LLM ── MCP (stdio | streamable HTTP) ── server.py (MCPServer)
+                                                │
+                    ┌───────────────────────────┼──────────────────────┐
+              tools/*.py                   session.py            prompts/, resources/
+                    │                (state: parts[], active_part,
+              sandbox.py              code history, tmpdir)
+              (subprocess:
+               cadquery exec)
+                    │
+              render.py (tessellate → pyrender/EGL → PNG grid)
+              validate.py (trimesh + manifold3d)
+              export.py (STEP via OCP/XCAF, STL/3MF/GLB via tessellation)
+              meshy.py (httpx → Meshy API, v2 only)
 ```
-Session state: the B-rep object cannot cross the subprocess boundary cheaply, so the subprocess serializes the shape to a BREP file in the session tmpdir; server-side tools reload it. Code history is the source of truth; the BREP file is a cache.
+Session state: the B-rep object cannot cross the subprocess boundary cheaply, so the subprocess serializes the shape to a BREP file in the session tmpdir; server-side tools reload it. Code history is the source of truth; the BREP file is a cache. In v2, each session holds an assembly of named parts, each with its own BREP and code history.
 
 ## 8. Key decisions and rationale
 - CadQuery over OpenSCAD: real B-rep kernel (OCCT) → STEP export, fillets/shells that OpenSCAD can't do, Python (better LLM fluency), selectors enable "the top face" style edits.
@@ -79,5 +80,140 @@ Session state: the B-rep object cannot cross the subprocess boundary cheaply, so
 3. Malicious code test suite (network attempt, file escape, fork bomb, infinite loop) — all contained.
 4. Fresh-machine setup (README steps) to first render in under 10 minutes.
 
-## 10. v2 backlog
-Streamable HTTP transport + auth · `gen_ai_mesh` (Meshy/Tripo) for organics · assembly support · parametric "tweak sliders" resource · STEP import + modify · multi-material 3MF.
+## 10. v2 features
+
+### 10.1 Streamable HTTP transport with auth
+
+**Motivation:** stdio works for local MCP hosts but cannot serve remote clients, web UIs, or multi-tenant deployments. Streamable HTTP (MCP SDK v2) adds a stateful HTTP endpoint that any network-reachable client can connect to.
+
+**Transport selection.** The server picks its transport at startup via CLI flag or env var. Only one transport is active per process.
+
+| Startup | Transport |
+|---|---|
+| `uv run cad-mcp` (default) | stdio |
+| `uv run cad-mcp --transport http` | streamable HTTP |
+| `CAD_MCP_TRANSPORT=http uv run cad-mcp` | streamable HTTP |
+
+**HTTP server defaults.**
+
+| Setting | Default | Env override |
+|---|---|---|
+| Host | `127.0.0.1` | `CAD_MCP_HOST` |
+| Port | `8000` | `CAD_MCP_PORT` |
+| MCP path | `/mcp` | — |
+| Stateless mode | off | `CAD_MCP_STATELESS=1` |
+
+**Authentication.** When `CAD_MCP_AUTH_TOKEN` is set, the server requires `Authorization: Bearer <token>` on every request. Implementation uses the SDK's `TokenVerifier` protocol with a simple symmetric-token verifier (compare against env var). Requests without a valid token receive HTTP 401. When the env var is unset, the server runs without auth (local development).
+
+Requirements:
+- H1: `mcp.run(transport="streamable-http", host=host, port=port)` with kwargs from env.
+- H2: Bearer token auth via a custom `TokenVerifier` that validates against `CAD_MCP_AUTH_TOKEN`. Return `AccessToken(token=t, client_id="bearer", scopes=["cad"])`.
+- H3: Stdio remains the default; no behavior change when `--transport` is absent.
+- H4: Session isolation: each HTTP MCP session gets its own `Session` (tmpdir, code history). Session cleanup on disconnect via `session_idle_timeout` (default 300s).
+- H5: CORS headers when `CAD_MCP_CORS_ORIGIN` is set (for browser-based MCP clients). Expose `Mcp-Session-Id` header.
+- H6: `TransportSecuritySettings(allowed_hosts=...)` derived from `CAD_MCP_HOST` and `CAD_MCP_ALLOWED_HOSTS` (comma-separated).
+- H7: Health endpoint: `GET /health` returns `{"status": "ok"}` without auth (registered via `@mcp.custom_route()`).
+
+**Files:** `src/cad_mcp/transport.py` (configure transport from env/args), updates to `server.py` main().
+
+**Gate:** server starts on `--transport http`; `curl /health` returns 200; tool call via `mcp` client over HTTP succeeds; request without token returns 401 when `CAD_MCP_AUTH_TOKEN` is set; stdio mode still works.
+
+---
+
+### 10.2 `gen_ai_mesh` tool (Meshy text-to-3D)
+
+**Motivation:** CadQuery excels at precise parametric parts but struggles with organic shapes (figurines, characters, terrain). The `gen_ai_mesh` tool delegates organic geometry to the Meshy API, downloads the result as GLB, and imports it into the session so the LLM can boolean-combine it with parametric parts.
+
+**Prerequisite:** `MESHY_API_KEY` env var (format `msy_...`). When unset, the tool is still registered but returns a structured error telling the LLM the key is missing and how to set it.
+
+**Tool spec:**
+
+| Field | Value |
+|---|---|
+| Tool name | `gen_ai_mesh` |
+| Input | `prompt: str`, `negative_prompt: str = ""`, `art_style: "realistic" \| "sculpture" = "realistic"`, `topology: "triangle" \| "quad" = "triangle"`, `target_polycount: int = 4000`, `refine: bool = False`, `ai_model: str = "latest"` |
+| Output | JSON: `{ok, task_id, status, model_urls, thumbnail_url, polycount, format}` or structured error |
+| Side effect | Downloads GLB to session tmpdir, imports as trimesh, converts to BREP if `refine=False`, stores as session shape so `render_views`/`export_model`/`validate_mesh` work on it |
+
+**Workflow (async with polling):**
+1. `POST https://api.meshy.ai/openapi/v2/text-to-3d` with `mode: "preview"`, auth via `Authorization: Bearer $MESHY_API_KEY`.
+2. Poll `GET .../text-to-3d/{task_id}` every 3s until `status` is `SUCCEEDED` or `FAILED`. Timeout after 120s.
+3. Download the GLB from `model_urls.glb`.
+4. If `refine=True`: POST again with `mode: "refine"` and `preview_task_id`, poll again (timeout 180s), download refined GLB.
+5. Import GLB via trimesh, convert to OCP shape (`BRepBuilderAPI_MakeShell` / sew from mesh triangles), serialize to session BREP.
+6. Return summary to LLM with thumbnail URL (as `ImageContent` if possible) and mesh stats.
+
+Requirements:
+- M1: Network call uses `httpx` (async). The tool itself is async. No network access from the sandbox -- this runs in the server process, not the subprocess.
+- M2: All API calls include `Authorization: Bearer {key}` header.
+- M3: Poll interval 3s, preview timeout 120s, refine timeout 180s. On timeout, return `{ok: false, error: "generation_timeout", task_id}` so the LLM can retry or adjust the prompt.
+- M4: On Meshy API error (4xx/5xx), return structured error with HTTP status, error message, and hint. 429 -> hint "rate limited, wait and retry".
+- M5: Downloaded GLB goes to `{session.tmpdir}/meshy/{task_id}.glb`. Never outside the session dir.
+- M6: Mesh-to-BREP conversion: triangulate via trimesh, build an OCP `TopoDS_Compound` from triangles using `BRepBuilderAPI_MakePolygon` + `BRepBuilderAPI_MakeFace` + `BRep_Builder.Add()`. This produces a tessellated B-rep (no NURBS surfaces) -- acceptable for organic shapes.
+- M7: The resulting shape is stored as the session's current shape (same as `execute_cad`). Code history records a synthetic entry: `# gen_ai_mesh: "{prompt}" (task_id: {id})`.
+- M8: `target_formats` sent to Meshy always includes `"glb"` (required for import). Additional formats are not requested to minimize generation time.
+- M9: When `MESHY_API_KEY` is unset, the tool returns `{ok: false, error: "missing_api_key", hint: "Set MESHY_API_KEY env var (get one at https://meshy.ai)"}`.
+- M10: Add `httpx>=0.28` to project dependencies.
+
+**Files:** `src/cad_mcp/tools/gen_ai_mesh.py`, `src/cad_mcp/meshy.py` (API client), register in `server.py`.
+
+**Gate:** with a live `MESHY_API_KEY`, `gen_ai_mesh(prompt="a simple chess pawn")` returns a shape that `render_views` can render and `export_model` can export as STL; without the key, returns the missing-key error; mock tests cover the poll loop, timeout, and error paths.
+
+---
+
+### 10.3 Assembly support
+
+**Motivation:** Real-world prints often involve multiple parts (a box + lid, a bracket + cover plate, a phone stand with a cable clip). Assembly support lets the LLM design multi-part models, position them relative to each other, and export each part as a separate STL while also offering a combined preview.
+
+**Concepts:**
+- **Part**: a named shape with a position (translation + rotation). Each part has its own code history.
+- **Assembly**: an ordered collection of parts. One assembly per session.
+- **Active part**: the part that `execute_cad` writes to. Defaults to `"main"`. Switch with `set_active_part`.
+
+**New tools:**
+
+| Tool | Input | Output | Notes |
+|---|---|---|---|
+| `create_part` | `name: str`, `color: str = "steel"` | confirmation + part list | Creates an empty part and sets it active. Name must be unique within the assembly. |
+| `set_active_part` | `name: str` | confirmation + active part info | Subsequent `execute_cad` calls write to this part. |
+| `position_part` | `name: str`, `translate: [x,y,z] = [0,0,0]`, `rotate: [rx,ry,rz] = [0,0,0]` | confirmation + new position | Translation in mm, rotation in degrees (Euler XYZ). Applied during render/export, not baked into geometry. |
+| `list_parts` | — | JSON array of `{name, bbox, solid_count, position, is_active}` | Overview of assembly state. |
+| `delete_part` | `name: str` | confirmation + remaining parts | Cannot delete the last part. |
+
+**Changes to existing tools:**
+
+| Tool | Change |
+|---|---|
+| `execute_cad` | Writes to the active part's code history and BREP. |
+| `render_views` | Renders all parts in a single scene with distinct colors. Optional `parts: list[str]` filter. |
+| `validate_mesh` | Validates each part independently. Optional `part: str` to validate one. Reports per-part + assembly-level interference check. |
+| `measure` | Adds `what: "clearance"` to measure minimum distance between two named parts. Existing modes operate on the active part. |
+| `export_model` | Adds `parts: "all" \| "active" \| list[str]` (default `"all"`). When exporting multiple parts: one file per part (`{filename}_{partname}.stl`) + one combined file. STEP export writes a single file with named solids (XCAF). |
+| `list_session` | Includes part list and active part name. |
+| `reset_session` | Clears all parts. |
+
+**Session state changes:**
+- `session.py` gains `parts: dict[str, Part]` where `Part` has `name`, `code_history`, `brep_path`, `color`, `position` (translation + rotation), `bbox`.
+- `active_part: str` tracks which part `execute_cad` targets.
+- Backward compatible: sessions with no explicit parts behave as today (implicit single part named `"main"`).
+
+Requirements:
+- A1: `create_part` creates a new `Part`, sets it active, returns updated part list.
+- A2: `set_active_part` validates the name exists, switches `session.active_part`.
+- A3: `position_part` stores translation/rotation on the `Part`. Applied as a rigid transform during tessellation for render/export/validate. The BREP geometry stays at origin.
+- A4: `render_views` composes all parts into one scene. Each part gets a distinct color from a preset palette (steel gray, blue, red, green, orange, purple). Color overridable via `create_part(color=)`.
+- A5: `export_model` with multiple parts produces `{name}_{part}.{ext}` per part + `{name}_assembly.{ext}` combined. STEP assembly export uses `XCAFDoc_ShapeTool` to write named shapes.
+- A6: `validate_mesh` per-part validation unchanged. Assembly-level: check for part-to-part interference using boolean intersection -- if intersection volume > 0.01 mm^3, flag as `interference` issue with the two part names.
+- A7: `measure(what="clearance", parts=["lid", "box"])` computes minimum distance between the two parts' shapes using `BRepExtrema_DistShapeShape`.
+- A8: Backward compatibility: a session that never calls `create_part` has one implicit part `"main"` and all existing behavior is unchanged. No migration needed.
+- A9: Part names are validated: `[a-z][a-z0-9_]{0,31}` (lowercase, starts with letter, max 32 chars).
+- A10: Maximum 16 parts per assembly (prevent runaway complexity).
+
+**Files:** update `src/cad_mcp/session.py` (Part dataclass, assembly state), new `src/cad_mcp/tools/create_part.py`, `set_active_part.py`, `position_part.py`, `list_parts.py`, `delete_part.py`; modify `execute_cad.py`, `render_views.py`, `validate_mesh.py`, `measure.py`, `export_model.py`, `list_session.py`, `reset_session.py`.
+
+**Gate:** create two parts (box + lid), position lid above box, render shows both with different colors, export produces 3 STLs (box, lid, assembly), validate flags interference when lid overlaps box, clearance measurement returns 0 when touching and >0 when separated.
+
+---
+
+## 11. v2+ backlog
+Parametric "tweak sliders" resource · STEP import + modify · multi-material 3MF · image-to-3D via Meshy `v1/image-to-3d` · undo/redo per part · assembly constraints solver (mate, align, offset).
