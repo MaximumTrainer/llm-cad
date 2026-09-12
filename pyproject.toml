@@ -21,6 +21,10 @@ dependencies = [
     # cadquery -> scipy), so a VTK restructure would have broken
     # rendering and validation at runtime in a user's session.
     "matplotlib>=3.8",
+    # trimesh's ray intersector needs rtree for its bounds tree, and the
+    # wall-thickness check casts rays to measure material rather than
+    # surface proximity (CAD-015).
+    "rtree>=1.1",
     "pillow>=10",
     "scipy>=1.11",
     "numpy>=1.26",

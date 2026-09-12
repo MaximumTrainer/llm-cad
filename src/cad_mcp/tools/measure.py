@@ -61,43 +61,168 @@ def _measure_faces(brep_path: Path) -> dict[str, Any]:
     return {"face_count": count}
 
 
+SELECTOR_KINDS = ("faces", "edges", "vertices")
+
+
+def _select(wp: Any, selector: str, kind: str) -> tuple[Any, int]:
+    """Resolve a selector to (shape, match_count) for a given kind."""
+    chooser = getattr(wp, kind)
+    selected = chooser(selector)
+    values = selected.vals()
+    if not values:
+        msg = f"selector {selector!r} matched no {kind}"
+        raise ValueError(msg)
+    return selected, len(values)
+
+
+def _resolve_selector(
+    wp: Any, selector: str, kind: str | None
+) -> tuple[Any, str, int]:
+    """Resolve against an explicit kind, or try faces then edges then vertices.
+
+    Returns ``(selection, kind_used, match_count)``.
+    """
+    if kind:
+        if kind not in SELECTOR_KINDS:
+            msg = (
+                f"Unknown selector kind {kind!r}. "
+                f"Choose from {list(SELECTOR_KINDS)}."
+            )
+            raise ValueError(msg)
+        selection, count = _select(wp, selector, kind)
+        return selection, kind, count
+
+    errors = []
+    for candidate in SELECTOR_KINDS:
+        try:
+            selection, count = _select(wp, selector, candidate)
+        except Exception as exc:
+            errors.append(f"{candidate}: {exc}")
+            continue
+        return selection, candidate, count
+    msg = (
+        f"selector {selector!r} matched nothing as a face, edge or "
+        f"vertex ({'; '.join(errors)})"
+    )
+    raise ValueError(msg)
+
+
 def _measure_distance(
     brep_path: Path,
     from_selector: str,
     to_selector: str,
+    from_kind: str | None = None,
+    to_kind: str | None = None,
 ) -> dict[str, Any]:
+    """True minimum distance between two selected entities.
+
+    This used to return the distance between the two entities' *centroids*.
+    For parallel planar faces that happens to equal the thickness; for a
+    cylindrical bore, a filleted face, or a selector matching several
+    entities it is a number with no physical meaning — reported to three
+    decimal places with no caveat, while the workflow prompt tells the LLM
+    to use exactly this call to confirm dimensions "within 0.1mm"
+    (CAD-018).
+    """
+    import cadquery as cq
+    from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+
+    from cad_mcp.export import _load_ocp_shape
+
+    shape = cq.Shape(_load_ocp_shape(brep_path))
+    wp = cq.Workplane("XY").newObject([shape])
+
+    from_sel, from_used, from_count = _resolve_selector(
+        wp, from_selector, from_kind
+    )
+    to_sel, to_used, to_count = _resolve_selector(wp, to_selector, to_kind)
+
+    tool = BRepExtrema_DistShapeShape(
+        from_sel.val().wrapped, to_sel.val().wrapped
+    )
+    if not tool.IsDone():
+        msg = "minimum-distance computation failed"
+        raise ValueError(msg)
+
+    result: dict[str, Any] = {
+        "distance_mm": round(tool.Value(), 4),
+        "from": {
+            "selector": from_selector,
+            "kind": from_used,
+            "matched": from_count,
+        },
+        "to": {
+            "selector": to_selector,
+            "kind": to_used,
+            "matched": to_count,
+        },
+        "unit": "mm",
+    }
+    if from_count > 1 or to_count > 1:
+        result["note"] = (
+            f"selector matched {from_count} {from_used} and "
+            f"{to_count} {to_used}; the distance is to the nearest of them"
+        )
+
+    if tool.NbSolution() > 0:
+        p1 = tool.PointOnShape1(1)
+        p2 = tool.PointOnShape2(1)
+        result["closest_point_from"] = {
+            "x": round(p1.X(), 3),
+            "y": round(p1.Y(), 3),
+            "z": round(p1.Z(), 3),
+        }
+        result["closest_point_to"] = {
+            "x": round(p2.X(), 3),
+            "y": round(p2.Y(), 3),
+            "z": round(p2.Z(), 3),
+        }
+    return result
+
+
+def _measure_center_distance(
+    brep_path: Path,
+    from_selector: str,
+    to_selector: str,
+    from_kind: str | None = None,
+    to_kind: str | None = None,
+) -> dict[str, Any]:
+    """Centroid-to-centroid distance, kept as an explicit mode.
+
+    Useful for things like hole-centre spacing, where the centroids are
+    what you actually mean.
+    """
     import cadquery as cq
 
     from cad_mcp.export import _load_ocp_shape
 
-    ocp_shape = _load_ocp_shape(brep_path)
-    shape = cq.Shape(ocp_shape)
+    shape = cq.Shape(_load_ocp_shape(brep_path))
     wp = cq.Workplane("XY").newObject([shape])
 
-    try:
-        from_obj = wp.faces(from_selector).val()
-    except Exception as exc:
-        return {"error": f"from_selector '{from_selector}' failed: {exc}"}
+    from_sel, from_used, from_count = _resolve_selector(
+        wp, from_selector, from_kind
+    )
+    to_sel, to_used, to_count = _resolve_selector(wp, to_selector, to_kind)
 
-    try:
-        to_obj = wp.faces(to_selector).val()
-    except Exception as exc:
-        return {"error": f"to_selector '{to_selector}' failed: {exc}"}
-
-    from_center = from_obj.Center()
-    to_center = to_obj.Center()
-    dist = from_center.sub(to_center).Length
+    a = from_sel.val().Center()
+    b = to_sel.val().Center()
     return {
-        "distance_mm": round(dist, 3),
-        "from_center": {
-            "x": round(from_center.x, 3),
-            "y": round(from_center.y, 3),
-            "z": round(from_center.z, 3),
+        "center_distance_mm": round(a.sub(b).Length, 4),
+        "from": {
+            "selector": from_selector,
+            "kind": from_used,
+            "matched": from_count,
+            "center": {
+                "x": round(a.x, 3), "y": round(a.y, 3), "z": round(a.z, 3)
+            },
         },
-        "to_center": {
-            "x": round(to_center.x, 3),
-            "y": round(to_center.y, 3),
-            "z": round(to_center.z, 3),
+        "to": {
+            "selector": to_selector,
+            "kind": to_used,
+            "matched": to_count,
+            "center": {
+                "x": round(b.x, 3), "y": round(b.y, 3), "z": round(b.z, 3)
+            },
         },
         "unit": "mm",
     }
@@ -168,7 +293,12 @@ def _summarise(what: str, result: dict[str, Any]) -> str:
     if what == "faces":
         return f"{result['face_count']} face(s)"
     if what == "distance":
-        return f"distance: {result.get('distance_mm')} mm"
+        return (
+            f"minimum distance: {result.get('distance_mm')} mm "
+            f"({result['from']['kind']} -> {result['to']['kind']})"
+        )
+    if what == "center_distance":
+        return f"centre-to-centre: {result.get('center_distance_mm')} mm"
     return what
 
 
@@ -180,26 +310,56 @@ def register(mcp: MCPServer) -> None:
         from_selector: str | None = None,
         to_selector: str | None = None,
         parts: list[str] | None = None,
+        from_kind: str | None = None,
+        to_kind: str | None = None,
         ctx: Context | None = None,
     ) -> str:
         """Take numeric measurements of the current model.
 
+        Use this to verify that the dimensions you intended actually
+        happened, before exporting.
+
         Args:
-            what: What to measure. One of ``bbox``, ``volume``,
-                  ``faces``, ``distance``, or ``clearance``.
-            from_selector: CadQuery face selector for the start face
-                           (required when ``what="distance"``).
-            to_selector: CadQuery face selector for the end face
-                         (required when ``what="distance"``).
-            parts: Two part names (required when ``what="clearance"``).
+            what: What to measure.
+                  ``bbox`` overall dimensions of the active part;
+                  ``volume`` enclosed volume in mm3;
+                  ``faces`` face count;
+                  ``distance`` the **minimum** distance between two
+                  selected entities — the right choice for wall
+                  thickness, gaps and clearances;
+                  ``center_distance`` the distance between the two
+                  selections' centroids — the right choice for hole
+                  spacing;
+                  ``clearance`` the minimum distance between two named
+                  parts.
+            from_selector: CadQuery selector for the first entity
+                           (``distance`` / ``center_distance``), e.g.
+                           ``">Z"`` or ``"|Z"``.
+            to_selector: CadQuery selector for the second entity.
+            parts: Exactly two part names (``clearance``).
+            from_kind: Force the first selector's entity kind —
+                       ``faces``, ``edges`` or ``vertices``. Inferred
+                       when omitted.
+            to_kind: Same, for the second selector.
 
         Returns:
-            JSON with the requested measurement in mm or mm³.
+            The measurement in mm or mm3. ``distance`` and
+            ``center_distance`` also report which entity kind each
+            selector resolved to and how many entities it matched, so a
+            selector that matched more than you expected is visible
+            rather than silently using the first.
         """
         sess = session.for_context(ctx)
 
         what = what.lower().strip()
-        valid = ("bbox", "volume", "faces", "distance", "clearance")
+        valid = (
+            "bbox",
+            "volume",
+            "faces",
+            "distance",
+            "center_distance",
+            "clearance",
+        )
         if what not in valid:
             return fail(
                 "ValueError",
@@ -241,14 +401,25 @@ def register(mcp: MCPServer) -> None:
                 result = _measure_volume(brep)
             elif what == "faces":
                 result = _measure_faces(brep)
-            elif what == "distance":
+            elif what in ("distance", "center_distance"):
                 if not from_selector or not to_selector:
                     return fail(
                         "ValueError",
-                        "distance needs both from_selector and to_selector.",
+                        f"{what} needs both from_selector and to_selector.",
                         hint='e.g. from_selector=">Z", to_selector="<Z".',
                     )
-                result = _measure_distance(brep, from_selector, to_selector)
+                measurer = (
+                    _measure_distance
+                    if what == "distance"
+                    else _measure_center_distance
+                )
+                result = measurer(
+                    brep,
+                    from_selector,
+                    to_selector,
+                    from_kind,
+                    to_kind,
+                )
             else:
                 return fail("ValueError", f"Unknown measurement: {what}")
         except Exception as exc:
@@ -256,6 +427,19 @@ def register(mcp: MCPServer) -> None:
 
         if "error" in result:
             return fail("MeasurementError", str(result["error"]))
+        part = sess.get_active_part()
+        positioned = any(part.translate) or any(part.rotate)
         return ok_data(
-            _summarise(what, result), {"measurement": what, **result}
+            _summarise(what, result),
+            {
+                "measurement": what,
+                "part": part.name,
+                # bbox/volume/faces/distance read the part's own geometry,
+                # which lives at the origin; only `clearance` applies the
+                # assembly transform. Saying so stops the LLM comparing
+                # positioned and unpositioned numbers (CAD-018).
+                "part_transform_applied": False,
+                "part_is_positioned": positioned,
+                **result,
+            },
         )

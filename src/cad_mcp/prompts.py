@@ -445,6 +445,13 @@ what the checks mean and how to fix failures.
   `wall_thickness.violations`.
 
 ## 2. Overhangs
+
+**Angle convention** (the same one `validate_mesh` reports): measured
+**from vertical**. 0 deg is a vertical wall, 90 deg is a horizontal
+ceiling. `max_overhang_deg=45` flags anything steeper than 45 deg from
+vertical. The report clusters offending faces into regions and gives each
+one a location, so fix the region it names rather than changing the whole
+model.
 - **Threshold**: 45° from vertical is the standard FDM limit without
   support.
 - Angles steeper than 45° (more horizontal) will sag or need support
