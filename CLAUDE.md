@@ -53,3 +53,16 @@ The visual feedback loop is the product. Any change that makes renders slower th
 - Don't upgrade cadquery/OCP pins casually — rendering and export are version-sensitive; run golden tests after any bump
 - Don't attempt parametric ops (fillet, shell) on AI-generated meshes — they're tessellated B-rep, not NURBS
 - Don't make live Meshy API calls in unit tests — mock httpx; gate integration tests on `MESHY_API_KEY`
+
+## Shared agent skills
+
+Shared skills live in [MaximumTrainer/agent-skills](https://github.com/MaximumTrainer/agent-skills). Before writing a new
+skill, runbook or repeated procedure, check the catalogue - and send genuinely
+general improvements back so the other repositories get them too.
+
+```bash
+python3 .claude/skills/skill-exchange/scripts/skills.py list
+python3 .claude/skills/skill-exchange/scripts/skills.py status
+```
+
+See `.claude/skills/skill-exchange/` for the workflow.
