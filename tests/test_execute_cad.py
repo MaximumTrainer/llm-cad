@@ -179,82 +179,12 @@ async def test_fillet_error_has_hint() -> None:
 # SPEC 9.3 — Malicious-code suite
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.anyio
-async def test_network_blocked() -> None:
-    code = """\
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.connect(("8.8.8.8", 53))
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
-    assert any(
-        w in text.lower()
-        for w in ("network", "disabled", "blocked", "oserror", "not allowed")
-    )
-
-
-@pytest.mark.anyio
-async def test_import_subprocess_blocked() -> None:
-    code = """\
-import subprocess
-subprocess.run(["echo", "pwned"])
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
-    assert "not allowed" in text.lower() or "ImportError" in text
-
-
-@pytest.mark.anyio
-async def test_import_shutil_blocked() -> None:
-    code = """\
-import shutil
-shutil.rmtree("/")
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
-    assert "not allowed" in text.lower()
-
-
-@pytest.mark.anyio
-async def test_os_system_blocked() -> None:
-    code = """\
-import os
-os.system("echo pwned")
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
-    assert any(
-        w in text.lower()
-        for w in ("blocked", "permission", "denied")
-    )
-
-
-@pytest.mark.anyio
-async def test_infinite_loop_killed() -> None:
-    code = """\
-while True:
-    pass
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(
-        await mcp.call_tool("execute_cad", {"code": code})
-    )
-    assert "TimeoutError" in text
-
-
-@pytest.mark.anyio
-async def test_fork_bomb_blocked() -> None:
-    code = """\
-import os
-while True:
-    os.fork()
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
+# ---------------------------------------------------------------------------
+# Containment
+#
+# The SPEC 9.3 vectors live in tests/test_sandbox_containment.py, which
+# asserts observable effects (no file written, no connection accepted, no
+# surviving process) instead of the error wording. The weak versions that
+# used to live here asserted `"OK" not in text` and passed while the
+# sandbox was wide open.
+# ---------------------------------------------------------------------------

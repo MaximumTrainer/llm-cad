@@ -8,7 +8,7 @@ LLMs are bad at emitting mesh data directly but excellent at writing code. This 
 - G2: Precise parametric modeling — "make the hole 2mm wider" must be a code edit, not a regeneration.
 - G3: Closed visual feedback loop — the LLM must be able to see what it built.
 - G4: Print-ready and CAD-ready output: STL, 3MF, STEP, GLB.
-- G5: Safe execution of model code (sandboxed, time-limited, no network/filesystem escape).
+- G5: Contained execution of model code — time-limited, memory-limited, no network, filesystem confined to the session directory. See N1 for the precise threat model; this is not a hostile-code jail.
 - G6: Teach the host — ship MCP prompts so an LLM that has never seen CadQuery can still succeed.
 
 ## 3. Non-goals (v1)
@@ -30,7 +30,7 @@ LLMs are bad at emitting mesh data directly but excellent at writing code. This 
 | `render_views` | `views: list` (default front/right/top/iso), `width`, `height` | MCP ImageContent — one grid PNG | ≤2s target. Orthographic + one perspective iso. Include axes + mm scale ticks. |
 | `validate_mesh` | `min_wall_mm: float = 1.2`, `max_overhang_deg: float = 45` | report: watertight, manifold, wall-thickness violations, overhang regions, est. volume/mass (PLA) | Runs on tessellated mesh via trimesh/manifold3d. |
 | `measure` | `what: "bbox"\|"volume"\|"faces"\|"distance"`, optional selectors | numeric results in mm/mm³ | Lets the LLM verify stated dimensions actually happened. |
-| `export_model` | `format: "stl"\|"step"\|"3mf"\|"glb"`, `filename` | file path + size; file written to session output dir | STEP from B-rep, others from tessellation with configurable tolerance. |
+| `export_model` | `format: "stl"\|"step"\|"3mf"\|"glb"`, `filename` | file path + size; file written to the durable output dir (`CAD_MCP_OUTPUT_DIR`, default `./cad-mcp-output/<session>/`), **not** the session temp dir, so exports survive `reset_session`. `filename` must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` | STEP from B-rep, others from tessellation with configurable tolerance. |
 | `list_session` | — | code history, current bbox, exports so far | Recovery after context loss. |
 | `reset_session` | — | confirmation | Clears state. |
 
@@ -44,7 +44,10 @@ LLMs are bad at emitting mesh data directly but excellent at writing code. This 
 - `cad://examples/{name}` — 8–10 curated example models (bracket, enclosure, gear, threaded cap...).
 
 ## 6. Non-functional requirements
-- N1 Sandbox: model code runs in a subprocess with 30s CPU timeout, memory cap (e.g. 2GB via resource limits), cwd = per-session temp dir, no network (block sockets), import allowlist (cadquery, math, numpy).
+- N1 Sandbox: model code runs in a subprocess under two layers of containment.
+  - **OS-enforced (hard guarantees).** Wall-clock timeout (30s default, `CAD_MCP_SANDBOX_TIMEOUT_S`); address-space/memory cap (2GB default, `CAD_MCP_SANDBOX_MEM_MB`) via `RLIMIT_AS`/`RLIMIT_DATA` on Unix and a Job Object with `JOB_OBJECT_LIMIT_PROCESS_MEMORY` on Windows; file-size cap (`RLIMIT_FSIZE`); process-count cap (`RLIMIT_NPROC` / `ActiveProcessLimit`); and a process-group/job kill on timeout so nothing is orphaned.
+  - **In-process (defence in depth).** Filesystem writes confined to the session temp dir and reads to that dir plus the Python installation; all socket implementations neutralised including the `_socket` C accelerator; process creation blocked (`fork`, `spawn*`, `exec*`, `system`, `popen`); and an import policy enforced both by a `builtins.__import__` hook and a `sys.meta_path` finder, so `importlib.import_module` cannot route around it.
+  - **Threat model.** The in-process layer runs in the same interpreter as user code and is therefore a barrier against accidents and casual misuse, **not** a jail for deliberately hostile code. Do not expose this server to untrusted prompts without OS-level isolation (a container, seccomp/bwrap, or a Windows restricted token) around the whole process.
 - N2 Latency: execute ≤5s typical, render ≤2s, validate ≤5s for meshes under 500k tris.
 - N3 Errors: every failure returns (a) what failed, (b) where (line number in the LLM's code), (c) a hint. Example: `KernelError on line 12: fillet radius 5 exceeds edge length 3.2 — reduce radius or pick fewer edges`.
 - N4 Determinism: same code → identical STEP topology and byte-stable STL (fixed tessellation seed/tolerances).
@@ -77,7 +80,7 @@ Session state: the B-rep object cannot cross the subprocess boundary cheaply, so
 ## 9. Acceptance criteria (v1 done =)
 1. From a cold start in Claude Code with only this server connected, the prompt "design a wall-mount bracket for a 30mm pipe, two M4 screw holes, 3mm walls" produces a validated, watertight STL within ≤4 LLM iterations, no human code edits.
 2. `measure` confirms requested dimensions within 0.1mm.
-3. Malicious code test suite (network attempt, file escape, fork bomb, infinite loop) — all contained.
+3. Containment suite — every vector asserted by **observable effect**, not by error wording: file write outside the session dir (no file appears), file read outside it, `socket`/`_socket` connection attempt (a real local listener accepts nothing), `subprocess` and `importlib` import bypass, `os.system`, `os.fork`, infinite loop (killed by timeout, no surviving process), and memory exhaustion (killed by the memory cap, reported as `MemoryError`). Each payload assigns a valid `result`, so a successful escape would be reported as `ok=true` and fail the test. Scope is bounded by the N1 threat model above.
 4. Fresh-machine setup (README steps) to first render in under 10 minutes.
 
 ## 10. v2 features

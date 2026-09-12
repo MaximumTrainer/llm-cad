@@ -32,3 +32,6 @@ Thumbs.db
 
 # Local secrets
 .env
+
+# Exported models (CAD_MCP_OUTPUT_DIR)
+cad-mcp-output/

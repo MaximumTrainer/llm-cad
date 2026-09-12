@@ -8,6 +8,11 @@ from mcp.server.mcpserver import MCPServer
 
 from cad_mcp import export, session
 from cad_mcp._logging import logged_tool
+from cad_mcp.paths import (
+    UnsafeFilename,
+    safe_output_path,
+    validate_filename,
+)
 
 
 def register(mcp: MCPServer) -> None:
@@ -67,9 +72,16 @@ def register(mcp: MCPServer) -> None:
         if not export_names:
             return _err("No model to export. Run execute_cad first.")
 
-        output_dir = sess.tmpdir / "output"
         ext = export.FORMAT_EXTENSIONS[fmt]
         base = filename or "model"
+        if base.endswith(ext):
+            base = base[: -len(ext)]
+        try:
+            validate_filename(base)
+        except UnsafeFilename as exc:
+            return _err(str(exc))
+
+        output_dir = sess.output_dir()
 
         if len(export_names) == 1:
             return _export_single(
@@ -134,7 +146,9 @@ def _export_multi(
                 "error": f"{type(exc).__name__}: {exc}",
             })
 
-    assembly_path = output_dir / f"{base}_assembly{ext}"
+    assembly_path = safe_output_path(
+        output_dir, f"{base}_assembly{ext}"
+    )
     assembly_result: dict[str, Any] = {}
     try:
         if fmt == "step":

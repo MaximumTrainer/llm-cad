@@ -5,6 +5,7 @@ transport; maps to MCP session IDs for HTTP transport).
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import tempfile
@@ -13,6 +14,19 @@ from pathlib import Path
 from typing import Any
 
 PART_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+
+def output_root() -> Path:
+    """Where exports are written.
+
+    Deliberately NOT the session tmpdir: that is deleted by
+    ``reset_session`` and reclaimed by the OS, so the artefact the whole
+    workflow exists to produce was stored in the one place guaranteed to
+    be thrown away (SPEC G4).
+    """
+    configured = os.environ.get("CAD_MCP_OUTPUT_DIR", "").strip()
+    root = Path(configured) if configured else Path.cwd() / "cad-mcp-output"
+    return root.expanduser().resolve()
 MAX_PARTS = 16
 DEFAULT_COLORS = ["steel", "blue", "red", "green", "orange", "purple"]
 
@@ -24,6 +38,12 @@ class Part:
     name: str
     code_history: list[str] = field(default_factory=list)
     color: str = "steel"
+    # "cadquery" geometry is reproducible by replaying code_history.
+    # "ai_mesh" geometry is not: it came from gen_ai_mesh and exists only
+    # as a BREP/GLB, so replaying history would silently destroy it.
+    source: str = "cadquery"
+    ai_prompt: str | None = None
+    ai_glb_path: str | None = None
     translate: tuple[float, float, float] = (0.0, 0.0, 0.0)
     rotate: tuple[float, float, float] = (0.0, 0.0, 0.0)
     bbox: dict[str, float] | None = None
@@ -46,6 +66,12 @@ class Session:
 
     def get_active_part(self) -> Part:
         return self.parts[self.active_part]
+
+    def output_dir(self) -> Path:
+        """Durable per-session export directory; survives reset."""
+        path = output_root() / self.session_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def brep_path(self, part_name: str | None = None) -> Path:
         name = part_name or self.active_part
@@ -107,10 +133,22 @@ def get_or_create(session_id: str = "default") -> Session:
 
 
 def reset(session_id: str = "default") -> str:
+    """Clear modelling state. Exported files are deliberately kept."""
+    kept: list[str] = []
     if session_id in _sessions:
-        _sessions[session_id].cleanup()
+        sess = _sessions[session_id]
+        kept = [e["path"] for e in sess.exports]
+        sess.cleanup()
         del _sessions[session_id]
-    return f"Session '{session_id}' has been reset."
+
+    msg = f"Session '{session_id}' has been reset."
+    if kept:
+        listing = "\n  ".join(kept)
+        msg += (
+            f" {len(kept)} exported file(s) were kept in "
+            f"{output_root() / session_id}:\n  {listing}"
+        )
+    return msg
 
 
 def cleanup_all() -> None:

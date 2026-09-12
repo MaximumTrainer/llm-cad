@@ -182,6 +182,46 @@ Pointing `OPENROUTER_MODEL` at a weak model will fail the acceptance test
 for model-capability reasons rather than server reasons — the transcript
 in the failure output distinguishes the two.
 
+## Security model
+
+Model code is executed, so it is worth being precise about what the
+sandbox does and does not promise.
+
+**Hard guarantees (enforced by the OS):** wall-clock timeout, memory cap,
+file-size cap, process-count cap, and a process-tree kill on timeout.
+These hold regardless of what the executed code does.
+
+**Defence in depth (enforced in-process):** filesystem writes are
+confined to the session temp directory and reads to that directory plus
+the Python installation; networking is unavailable (including the
+`_socket` accelerator); process creation is blocked; and the import
+policy is enforced on both `__import__` and `sys.meta_path`, so
+`importlib` cannot route around it. Exports are additionally validated:
+`filename` must be a single safe component, and the resolved path is
+re-checked against the output directory.
+
+**What this is not.** The in-process layer shares an interpreter with the
+code it constrains, so it stops accidents and casual misuse — not a
+determined attacker. **Do not point this server at untrusted prompts
+without OS-level isolation** (a container, seccomp/bwrap, or a Windows
+restricted token) around the whole process.
+
+Tunables: `CAD_MCP_SANDBOX_TIMEOUT_S` (30), `CAD_MCP_SANDBOX_MEM_MB`
+(2048), `CAD_MCP_SANDBOX_FILE_MB` (512), `CAD_MCP_SANDBOX_MAX_PROCS` (64).
+
+Over HTTP: set `CAD_MCP_AUTH_TOKEN` for bearer auth (compared in constant
+time) and `CAD_MCP_ALLOWED_HOSTS` for DNS-rebinding protection. A
+non-loopback bind without both logs a warning at startup; bearer auth
+over plain HTTP is for localhost or a trusted network only — put a TLS
+terminator in front of anything else.
+
+## Where exports go
+
+`export_model` writes to `CAD_MCP_OUTPUT_DIR` (default
+`./cad-mcp-output/<session-id>/`). This is deliberately **not** the
+session temp directory: `reset_session` clears modelling state but keeps
+exported files, and tells you where they are.
+
 ## Troubleshooting
 
 ### CadQuery / OCP installation

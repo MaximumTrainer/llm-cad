@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-import shutil
+import os
+import uuid
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -48,16 +49,22 @@ def register(mcp: MCPServer) -> None:
         else:
             part.code_history.append(code)
 
-        result = sandbox.run(part.accumulated_code(), sess.tmpdir)
+        # The worker writes to a per-run path; only a successful run is
+        # promoted onto the part, so a failure never clobbers good
+        # geometry and concurrent runs cannot collide (CAD-008).
+        staged = sess.tmpdir / f"staged-{uuid.uuid4().hex[:12]}.brep"
+        result = sandbox.run(
+            part.accumulated_code(), sess.tmpdir, brep_out=staged
+        )
 
         if result.ok:
             part.bbox = result.bbox
-            sandbox_brep = sess.tmpdir / "current.brep"
-            part_brep = sess.brep_path()
-            if sandbox_brep.exists() and sandbox_brep != part_brep:
-                shutil.copy2(str(sandbox_brep), str(part_brep))
+            part.source = "cadquery"
+            if staged.exists():
+                os.replace(str(staged), str(sess.brep_path()))
         else:
             part.code_history = prev_history
+            staged.unlink(missing_ok=True)
 
         return result.format_for_llm()
 

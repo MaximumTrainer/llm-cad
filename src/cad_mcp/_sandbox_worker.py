@@ -7,104 +7,28 @@ JSON line to stdout with the result.
 """
 from __future__ import annotations
 
-import builtins
 import io
 import json
 import os
 import sys
 import traceback
 
-
-def _block_sockets() -> None:
-    import socket as _sock
-
-    class _Blocked:
-        def __init__(self, *a: object, **kw: object) -> None:
-            raise OSError("Network access is disabled in the CAD sandbox")
-
-    _sock.socket = _Blocked  # type: ignore[assignment,misc]
+_RESULT_PATH = os.environ.get("CAD_MCP_RESULT_OUT", "")
 
 
-def _block_dangerous_os() -> None:
-    from collections.abc import Callable
+def emit(payload: dict[str, object]) -> None:
+    """Write the result where the parent can read it unambiguously.
 
-    def _denied(name: str) -> Callable[..., None]:
-        def _raise(*a: object, **kw: object) -> None:
-            raise PermissionError(f"{name}() is blocked in the CAD sandbox")
-
-        return _raise
-
-    for fn in (
-        "system",
-        "popen",
-        "execl",
-        "execle",
-        "execlp",
-        "execlpe",
-        "execv",
-        "execve",
-        "execvp",
-        "execvpe",
-        "spawnl",
-        "spawnle",
-        "spawnlp",
-        "spawnlpe",
-        "spawnv",
-        "spawnve",
-        "spawnvp",
-        "spawnvpe",
-    ):
-        if hasattr(os, fn):
-            setattr(os, fn, _denied(fn))
-
-
-def _install_import_restriction() -> None:
-    allowed_top = frozenset({"cadquery", "math", "numpy"})
-    denied_top = frozenset(
-        {
-            "subprocess",
-            "multiprocessing",
-            "ctypes",
-            "shutil",
-            "http",
-            "urllib",
-            "requests",
-            "webbrowser",
-            "xmlrpc",
-            "ftplib",
-            "smtplib",
-            "poplib",
-            "imaplib",
-            "socketserver",
-            "asyncio",
-            "concurrent",
-        }
-    )
-    snapshot = frozenset(sys.modules.keys())
-    real_import = builtins.__import__
-
-    def restricted(
-        name: str,
-        globals: dict[str, object] | None = None,
-        locals: dict[str, object] | None = None,
-        fromlist: tuple[str, ...] = (),
-        level: int = 0,
-    ) -> object:
-        if level != 0:
-            return real_import(name, globals, locals, fromlist, level)
-        top = name.split(".")[0]
-        if top in denied_top:
-            raise ImportError(
-                f"Import of '{name}' is not allowed in the sandbox."
-            )
-        if top in allowed_top or top in snapshot:
-            return real_import(name, globals, locals, fromlist, level)
-        raise ImportError(
-            f"Import of '{name}' is not allowed. "
-            f"Available modules: cadquery, math, numpy."
-        )
-
-    builtins.__import__ = restricted  # type: ignore[assignment]
+    stdout is shared with anything CadQuery, VTK or OCP decide to
+    print ('VTK not installed' is a real example), so using it as the
+    result channel is the stdout-corruption hazard PLAN warns about.
+    A dedicated file has no such collisions.
+    """
+    blob = json.dumps(payload)
+    if _RESULT_PATH:
+        with open(_RESULT_PATH, "w", encoding="utf-8") as fh:
+            fh.write(blob)
+    print(blob)
 
 
 def _add_hint(msg: str, snippet: str | None = None) -> str | None:
@@ -134,24 +58,25 @@ def _add_hint(msg: str, snippet: str | None = None) -> str | None:
 
 def main() -> None:
     tmpdir = sys.argv[1]
+    code_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
+        tmpdir, "user_code.py"
+    )
     os.chdir(tmpdir)
 
-    # 1. Block sockets before any other import
-    _block_sockets()
-
-    # 2. Import cadquery (needs to happen before import restriction)
+    # Import cadquery fully before any guard is installed: it pulls in a
+    # large lazy dependency tree, and the guards must not fight it.
     import cadquery
 
-    # 3. Block dangerous os functions
-    _block_dangerous_os()
-
-    # 4. Install import restriction
-    _install_import_restriction()
-
-    # 5. Read user code
-    code_path = os.path.join(tmpdir, "user_code.py")
-    with open(code_path) as f:
+    # Read the user's code before the path guard exists — the code file
+    # lives in the session dir, so this is also legal afterwards, but
+    # doing it first keeps the guard's allowed set minimal.
+    with open(code_path, encoding="utf-8") as f:
         user_code = f.read()
+
+    # Everything after this line runs confined (SPEC N1).
+    from cad_mcp._sandbox_policy import install_all
+
+    install_all(tmpdir)
 
     # 6. Redirect stdout to capture user prints during exec
     real_stdout = sys.stdout
@@ -184,15 +109,14 @@ def main() -> None:
         hint = _add_hint(str(exc), user_text)
         if hint:
             err["hint"] = hint
-        print(json.dumps(err))
+        emit(err)
         return
 
     sys.stdout = real_stdout
 
     # 8. Check for result variable
     if "result" not in ns:
-        print(
-            json.dumps(
+        emit(
                 {
                     "ok": False,
                     "error_type": "NameError",
@@ -202,7 +126,7 @@ def main() -> None:
                     ),
                     "hint": "Add: result = cq.Workplane('XY').box(10, 10, 10)",
                 }
-            )
+            
         )
         return
 
@@ -214,8 +138,7 @@ def main() -> None:
     elif hasattr(result, "wrapped"):
         wp = cadquery.Workplane().newObject([result])
     else:
-        print(
-            json.dumps(
+        emit(
                 {
                     "ok": False,
                     "error_type": "TypeError",
@@ -225,7 +148,7 @@ def main() -> None:
                     ),
                     "hint": "result = cq.Workplane('XY').box(10, 10, 10)",
                 }
-            )
+            
         )
         return
 
@@ -251,29 +174,29 @@ def main() -> None:
         pass
 
     # 12. Serialize to BREP
-    brep_path = os.path.join(tmpdir, "current.brep")
+    brep_path = os.environ.get("CAD_MCP_BREP_OUT") or os.path.join(
+        tmpdir, "current.brep"
+    )
     try:
         wp.val().exportBrep(brep_path)
     except Exception as export_err:
-        print(
-            json.dumps(
+        emit(
                 {
                     "ok": False,
                     "error_type": "ExportError",
                     "message": f"Failed to serialize shape to BREP: {export_err}",
                 }
-            )
+            
         )
         return
 
-    print(
-        json.dumps(
+    emit(
             {
                 "ok": True,
                 "solid_count": solid_count,
                 "bbox": bbox,
             }
-        )
+        
     )
 
 
