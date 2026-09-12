@@ -131,11 +131,56 @@ CAD_MCP_TRANSPORT=http uv run cad-mcp
 ## Development
 
 ```bash
-uv run pytest             # tests
+uv run pytest             # tests (live LLM tests excluded by default)
 uv run ruff check .       # lint
 uv run mypy --strict src/cad_mcp  # type check
 uv run python scripts/smoke.py   # end-to-end smoke test
 ```
+
+### Live LLM integration tests
+
+`tests/test_llm_integration.py` drives the server with a real model over
+[OpenRouter](https://openrouter.ai), which is the only way to verify the
+things that matter solely to an LLM: that the published tool schemas are
+accepted by a function-calling provider, that `render_views` images are
+actually *readable* (including the mm scale ticks), that the structured
+errors of SPEC N3 are actionable enough to recover from, and SPEC 9.1
+itself — which is written about an LLM iterating, not about replaying a
+known-good example.
+
+These cost money and need network, so they are excluded from the default
+run and gated on an API key:
+
+```bash
+cp .env.example .env        # then add your key
+export OPENROUTER_API_KEY=sk-or-...
+
+uv run pytest -m llm -v     # schema, render-readability, error-recovery
+```
+
+The full SPEC 9.1 design loop is gated a second time, because it is the
+expensive one (roughly 100k+ tokens against a frontier model):
+
+```bash
+CAD_MCP_LLM_ACCEPTANCE=1 uv run pytest -m llm -v
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | — | Required. Tests skip without it. |
+| `OPENROUTER_MODEL` | `anthropic/claude-sonnet-5` | Must support tool calling **and** image input. |
+| `OPENROUTER_MAX_TOKENS` | `2048` | OpenRouter bills against the requested cap, so a small balance needs a small value. |
+| `CAD_MCP_LLM_ACCEPTANCE` | unset | Set to `1` to run the paid SPEC 9.1 loop. |
+
+Run the bracket loop by hand and print a tool-call transcript:
+
+```bash
+uv run python tests/llm_harness.py
+```
+
+Pointing `OPENROUTER_MODEL` at a weak model will fail the acceptance test
+for model-capability reasons rather than server reasons — the transcript
+in the failure output distinguishes the two.
 
 ## Troubleshooting
 

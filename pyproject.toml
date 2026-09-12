@@ -23,6 +23,13 @@ packages = ["src/cad_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "llm: live LLM calls via OpenRouter; needs OPENROUTER_API_KEY, costs money",
+    "integration: talks to a network service",
+    "slow: takes more than a few seconds",
+]
+# Live LLM tests are opt-in: select them with `-m llm`.
+addopts = "-m 'not llm'"
 
 [tool.mypy]
 strict = true
