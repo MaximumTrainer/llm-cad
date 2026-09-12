@@ -16,6 +16,10 @@ from cad_mcp.server import mcp
 
 from .envelope_helpers import flat, summary
 
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

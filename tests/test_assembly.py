@@ -17,6 +17,10 @@ from cad_mcp.server import mcp
 
 from .envelope_helpers import flat, part_report, summary
 
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
+
 BOX_CODE = """\
 import cadquery as cq
 result = cq.Workplane("XY").box(20, 20, 10)

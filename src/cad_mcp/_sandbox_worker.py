@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import traceback
+from typing import Any
 
 _RESULT_PATH = os.environ.get("CAD_MCP_RESULT_OUT", "")
 
@@ -202,16 +203,47 @@ def _context_lines(source: str, line: int, radius: int = 2) -> list[str]:
     return out
 
 
+def serve() -> None:
+    """Pre-warm, then run exactly one job and exit.
+
+    The expensive part - importing CadQuery - happens before any job
+    arrives. A job is one JSON line on stdin giving the session tmpdir and
+    the paths to use. The process handles it and exits, so the interpreter
+    and namespace are never reused for a second job (CAD-014).
+    """
+    import cadquery
+
+    sys.stderr.write("cad-mcp worker ready\n")
+    sys.stderr.flush()
+
+    line = sys.stdin.readline()
+    if not line.strip():
+        return
+    job = json.loads(line)
+
+    global _RESULT_PATH
+    _RESULT_PATH = job["result_out"]
+    os.environ["CAD_MCP_BREP_OUT"] = job["brep_out"]
+    _run_job(job["tmpdir"], job["code_path"], cadquery)
+
+
 def main() -> None:
+    if "--serve" in sys.argv[1:]:
+        serve()
+        return
+
     tmpdir = sys.argv[1]
     code_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
         tmpdir, "user_code.py"
     )
-    os.chdir(tmpdir)
 
-    # Import cadquery fully before any guard is installed: it pulls in a
-    # large lazy dependency tree, and the guards must not fight it.
     import cadquery
+
+    _run_job(tmpdir, code_path, cadquery)
+
+
+def _run_job(tmpdir: str, code_path: str, cadquery: Any) -> None:
+    os.chdir(tmpdir)
 
     # Read the user's code before the path guard exists — the code file
     # lives in the session dir, so this is also legal afterwards, but

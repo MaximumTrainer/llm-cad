@@ -22,6 +22,10 @@ from PIL import Image  # type: ignore[import-untyped]
 from cad_mcp import render, session
 from cad_mcp.server import mcp
 
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
+
 BRACKET_CODE = """\
 import cadquery as cq
 

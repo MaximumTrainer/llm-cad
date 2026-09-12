@@ -49,10 +49,10 @@ else
   fi
 
   # 4. Fast tests only; the full suite runs on pre-push and in CI.
-  if $RUN pytest -q -m "not slow and not llm and not integration" -x >/dev/null 2>&1; then
-    ok "fast tests"
+  if $RUN pytest -q -m "not geometry and not slow" -x >/dev/null 2>&1; then
+    ok "fast tests (~25s; geometry deferred to pre-push)"
   else
-    die "fast tests failed (run: uv run pytest -m 'not slow and not llm')"
+    die "fast tests failed (run: uv run pytest -m 'not geometry and not slow')"
   fi
 fi
 

@@ -20,6 +20,10 @@ from mcp.types import TextContent
 from cad_mcp.envelope import fail, ok, ok_data, validate
 from cad_mcp.server import mcp
 
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
+
 BOX = "import cadquery as cq\nresult = cq.Workplane('XY').box(10, 10, 10)"
 
 

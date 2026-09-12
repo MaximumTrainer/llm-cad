@@ -18,10 +18,13 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from cad_mcp import warm_worker
 
 _WORKER = Path(__file__).with_name("_sandbox_worker.py")
 
@@ -203,6 +206,99 @@ def _assign_windows_job(proc: subprocess.Popen[str], memory_bytes: int) -> Any:
         return None
 
 
+def _worker_env(out_brep: Path, out_result: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["CAD_MCP_BREP_OUT"] = str(out_brep)
+    env["CAD_MCP_RESULT_OUT"] = str(out_result)
+    # The worker imports cad_mcp._sandbox_policy; make the package
+    # importable whether running from a source checkout or a wheel.
+    pkg_parent = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [pkg_parent, env.get("PYTHONPATH", "")]
+    ).strip(os.pathsep)
+    return env
+
+
+def _popen_kwargs(
+    cwd: Path,
+    env: dict[str, str],
+    memory_bytes: int,
+    max_file_bytes: int,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "cwd": str(cwd),
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "env": env,
+    }
+    preexec = _preexec(memory_bytes, max_file_bytes, DEFAULT_MAX_PROCS)
+    if preexec is not None:
+        kwargs["preexec_fn"] = preexec
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    return kwargs
+
+
+def _spawn_worker(
+    tmpdir: Path,
+    code_file: Path,
+    env: dict[str, str],
+    memory_bytes: int,
+    max_file_bytes: int,
+) -> subprocess.Popen[str]:
+    """Start a cold worker that takes its job from argv."""
+    return subprocess.Popen(
+        [sys.executable, str(_WORKER), str(tmpdir), str(code_file)],
+        **_popen_kwargs(tmpdir, env, memory_bytes, max_file_bytes),
+    )
+
+
+def prewarm() -> None:
+    """Start a spare worker so the next execute_cad is warm.
+
+    Called once at server start-up. Blocking until the worker reports
+    ready matters: a process that has merely been *started* is not warm,
+    and handing one out mid-import would move the cost rather than
+    remove it.
+    """
+    if not warm_worker.enabled():
+        return
+
+    def spawn() -> subprocess.Popen[str]:
+        env = dict(os.environ)
+        pkg_parent = str(Path(__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [pkg_parent, env.get("PYTHONPATH", "")]
+        ).strip(os.pathsep)
+
+        proc = subprocess.Popen(
+            [sys.executable, str(_WORKER), "--serve"],
+            **_popen_kwargs(
+                Path.cwd(),
+                env,
+                DEFAULT_MEMORY_MB * 1024 * 1024,
+                DEFAULT_MAX_FILE_MB * 1024 * 1024,
+            ),
+        )
+
+        assert proc.stderr is not None
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            line = proc.stderr.readline()
+            if not line:
+                break
+            if "worker ready" in line:
+                return proc
+        proc.kill()
+        msg = "warm sandbox worker never reported ready"
+        raise RuntimeError(msg)
+
+    warm_worker.POOL.configure(spawn)
+    warm_worker.POOL.prewarm()
+
+
 def _kill_tree(proc: subprocess.Popen[str]) -> None:
     """Kill the child and everything it spawned."""
     if sys.platform == "win32":
@@ -244,36 +340,33 @@ def run(
     out_brep = brep_out or (run_dir / "out.brep")
     out_result = run_dir / "result.json"
 
-    cmd = [sys.executable, str(_WORKER), str(tmpdir), str(code_file)]
+    env = _worker_env(out_brep, out_result)
 
-    env = dict(os.environ)
-    env["CAD_MCP_BREP_OUT"] = str(out_brep)
-    env["CAD_MCP_RESULT_OUT"] = str(out_result)
-    # The worker imports cad_mcp._sandbox_policy; make the package
-    # importable whether running from a source checkout or a wheel.
-    pkg_parent = str(Path(__file__).resolve().parent.parent)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [pkg_parent, env.get("PYTHONPATH", "")]
-    ).strip(os.pathsep)
+    # A pre-warmed worker has already paid the ~3.3s CadQuery import, so
+    # the timeout below covers execution rather than start-up. It is
+    # single-use: the interpreter and namespace are never reused for a
+    # second job, so isolation is unchanged (CAD-014).
+    proc = warm_worker.POOL.take()
+    job_payload: str | None = None
+    windows_job: Any = None
 
-    popen_kwargs: dict[str, Any] = {
-        "cwd": str(tmpdir),
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "text": True,
-        "env": env,
-    }
-    preexec = _preexec(memory_bytes, max_file_bytes, DEFAULT_MAX_PROCS)
-    if preexec is not None:
-        popen_kwargs["preexec_fn"] = preexec
-    if _IS_WINDOWS:
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-
-    proc = subprocess.Popen(cmd, **popen_kwargs)
-    job = _assign_windows_job(proc, memory_bytes)
+    if proc is not None:
+        job_payload = json.dumps(
+            {
+                "tmpdir": str(tmpdir),
+                "code_path": str(code_file),
+                "brep_out": str(out_brep),
+                "result_out": str(out_result),
+            }
+        )
+    else:
+        proc = _spawn_worker(
+            tmpdir, code_file, env, memory_bytes, max_file_bytes
+        )
+        windows_job = _assign_windows_job(proc, memory_bytes)
 
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(job_payload, timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
         with contextlib.suppress(subprocess.TimeoutExpired):
@@ -285,10 +378,10 @@ def run(
             hint="Simplify the model or break it into smaller steps.",
         )
     finally:
-        if job is not None:
+        if windows_job is not None:
             import ctypes
 
-            ctypes.WinDLL("kernel32").CloseHandle(job)
+            ctypes.WinDLL("kernel32").CloseHandle(windows_job)
 
     stdout = (stdout or "").strip()
     stderr = (stderr or "").strip()

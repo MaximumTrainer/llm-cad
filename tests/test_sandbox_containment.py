@@ -34,6 +34,10 @@ import pytest
 
 from cad_mcp import sandbox
 
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
+
 VALID_TAIL = "\nimport cadquery as cq\nresult = cq.Workplane('XY').box(1,1,1)"
 
 

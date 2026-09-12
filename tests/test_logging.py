@@ -21,6 +21,10 @@ import pytest
 from cad_mcp import _logging, session
 from cad_mcp.server import mcp
 
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
+
 ROOT = Path(__file__).resolve().parent.parent
 BOX = "import cadquery as cq\nresult = cq.Workplane('XY').box(5,5,5)"
 

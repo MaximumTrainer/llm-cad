@@ -19,6 +19,10 @@ from cad_mcp.transport import BearerTokenVerifier, TransportConfig
 
 from .envelope_helpers import flat, summary
 
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
+
 BOX = "import cadquery as cq\nresult = cq.Workplane('XY').box(10, 10, 10)"
 
 
