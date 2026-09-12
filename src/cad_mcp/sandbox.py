@@ -378,7 +378,10 @@ def run(
             hint="Simplify the model or break it into smaller steps.",
         )
     finally:
-        if windows_job is not None:
+        # `sys.platform` rather than a module-level flag, so mypy narrows
+        # and does not look for ctypes.WinDLL on Linux — which is exactly
+        # what CI caught on its first run.
+        if windows_job is not None and sys.platform == "win32":
             import ctypes
 
             ctypes.WinDLL("kernel32").CloseHandle(windows_job)

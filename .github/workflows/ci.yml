@@ -31,6 +31,13 @@ jobs:
         run: uv run ruff check .
       - name: mypy --strict
         run: uv run mypy
+      # Platform-conditional code (Windows job objects, POSIX rlimits)
+      # typechecks differently per platform, and a developer only ever
+      # runs one. CI caught ctypes.WinDLL this way on its first run.
+      - name: mypy --strict (other platforms)
+        run: |
+          uv run mypy --platform win32
+          uv run mypy --platform darwin
 
   test:
     name: tests (${{ matrix.os }})

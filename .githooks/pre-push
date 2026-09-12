@@ -3,6 +3,14 @@
 set -uo pipefail
 if command -v uv >/dev/null 2>&1; then RUN="uv run"; else RUN="python -m"; fi
 
+echo "pre-push: typecheck for every supported platform..."
+for platform in linux darwin win32; do
+  if ! $RUN mypy --platform "$platform" >/dev/null 2>&1; then
+    echo "✗ mypy --platform $platform failed (run: uv run mypy --platform $platform)" >&2
+    exit 1
+  fi
+done
+
 echo "pre-push: full test suite (live LLM tests excluded)..."
 if ! $RUN pytest -q; then
   echo "✗ test suite failed" >&2; exit 1
