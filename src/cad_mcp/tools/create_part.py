@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
@@ -17,6 +17,7 @@ def register(mcp: MCPServer) -> None:
     def create_part(
         name: str,
         color: str = "",
+        ctx: Context | None = None,
     ) -> str:
         """Create a new named part and set it as the active part.
 
@@ -38,7 +39,7 @@ def register(mcp: MCPServer) -> None:
                 f"[a-z][a-z0-9_]{{0,31}}."
             )
 
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
 
         if name in sess.parts:
             return _err(f"Part '{name}' already exists.")
@@ -57,9 +58,18 @@ def register(mcp: MCPServer) -> None:
                 f"Choose from: {DEFAULT_COLORS}"
             )
 
-        part = Part(name=name, color=color)
-        sess.parts[name] = part
-        sess.active_part = name
+        # Check-then-insert must be atomic: two concurrent create_part
+        # calls could otherwise both pass the uniqueness check (CAD-008).
+        with sess.lock:
+            if name in sess.parts:
+                return _err(f"Part '{name}' already exists.")
+            if len(sess.parts) >= MAX_PARTS:
+                return _err(
+                    f"Maximum {MAX_PARTS} parts per assembly. "
+                    f"Delete a part first."
+                )
+            sess.parts[name] = Part(name=name, color=color)
+            sess.active_part = name
 
         parts_list = _parts_summary(sess)
         return json.dumps({

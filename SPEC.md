@@ -26,6 +26,7 @@ LLMs are bad at emitting mesh data directly but excellent at writing code. This 
 ### 5.1 Tools
 | Tool | Input | Output | Notes |
 |---|---|---|---|
+| `ping` | — | `"pong"` | Connectivity check; lets a host verify the server is reachable before doing work. |
 | `execute_cad` | `code: str` (Python/CadQuery), `mode: "replace"\|"append"` | success + object summary (solids count, bbox) or structured error | Code must assign final shape to variable `result`. Append mode re-runs history + new code. |
 | `render_views` | `views: list` (default front/right/top/iso), `width`, `height` | MCP ImageContent — one grid PNG | ≤2s target. Orthographic + one perspective iso. Include axes + mm scale ticks. |
 | `validate_mesh` | `min_wall_mm: float = 1.2`, `max_overhang_deg: float = 45` | report: watertight, manifold, wall-thickness violations, overhang regions, est. volume/mass (PLA) | Runs on tessellated mesh via trimesh/manifold3d. |

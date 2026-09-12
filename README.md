@@ -99,6 +99,7 @@ CAD_MCP_TRANSPORT=http uv run cad-mcp
 
 | Tool | Description |
 |------|-------------|
+| `ping` | Connectivity check. Returns `pong`. |
 | `execute_cad` | Run CadQuery Python code in a sandbox. Assign result to `result`. |
 | `render_views` | Render multi-angle PNG preview (front/right/top/iso) |
 | `validate_mesh` | Check watertight, manifold, wall thickness, overhangs, PLA mass |

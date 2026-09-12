@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Reject empty or uninformative commit subjects.
+set -uo pipefail
+msg_file="$1"
+subject=$(grep -vE '^\s*#' "$msg_file" | sed '/^\s*$/d' | head -1)
+
+if [ -z "${subject// }" ]; then
+  echo "✗ empty commit message" >&2; exit 1
+fi
+words=$(printf '%s' "$subject" | wc -w | tr -d ' ')
+if [ "$words" -lt 2 ]; then
+  echo "✗ commit subject '$subject' is a single word — say what changed and why" >&2
+  exit 1
+fi
+if [ "${#subject}" -gt 72 ]; then
+  echo "✗ commit subject is ${#subject} chars (max 72); put detail in the body" >&2
+  exit 1
+fi
+case "$subject" in
+  wip|WIP*|fix|update|changes|stuff|asdf*)
+    echo "✗ commit subject '$subject' says nothing" >&2; exit 1 ;;
+esac
+exit 0

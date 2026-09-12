@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 import httpx
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import meshy, session
 from cad_mcp._logging import logged_tool
@@ -25,6 +25,7 @@ def register(mcp: MCPServer) -> None:
         target_polycount: int = 4000,
         refine: bool = False,
         ai_model: str = "latest",
+        ctx: Context | None = None,
     ) -> str:
         """Generate a 3D mesh from a text description using the Meshy API.
 
@@ -59,7 +60,7 @@ def register(mcp: MCPServer) -> None:
                 "hint": "Set MESHY_API_KEY env var (get one at https://meshy.ai)",
             })
 
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
         part = sess.get_active_part()
 
         try:

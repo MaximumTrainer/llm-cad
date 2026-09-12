@@ -68,6 +68,19 @@ def log_tool_call(
     )
 
 
+def _session_id(sess_mod: Any, kwargs: dict[str, Any]) -> str:
+    """Real session id for the call, not a constant.
+
+    The previous implementation called `get_or_create()` with no argument,
+    so every log line said "default" regardless of which client made the
+    request (CAD-007/CAD-026).
+    """
+    sid: str = "default"
+    with contextlib.suppress(Exception):
+        sid = str(sess_mod.resolve_id(kwargs.get("ctx")))
+    return sid
+
+
 def logged_tool(tool_name: str) -> Callable[..., Any]:
     """Decorator that wraps a tool function with structured logging.
 
@@ -90,10 +103,10 @@ def logged_tool(tool_name: str) -> Callable[..., Any]:
                     raise
                 finally:
                     elapsed = time.perf_counter() - t0
-                    sid = "default"
-                    with contextlib.suppress(Exception):
-                        sid = sess_mod.get_or_create().session_id
-                    log_tool_call(tool_name, sid, elapsed, success)
+                    log_tool_call(
+                        tool_name, _session_id(sess_mod, kwargs), elapsed,
+                        success,
+                    )
 
             return async_wrapper
 
@@ -110,10 +123,9 @@ def logged_tool(tool_name: str) -> Callable[..., Any]:
                 raise
             finally:
                 elapsed = time.perf_counter() - t0
-                sid = "default"
-                with contextlib.suppress(Exception):
-                    sid = sess_mod.get_or_create().session_id
-                log_tool_call(tool_name, sid, elapsed, success)
+                log_tool_call(
+                    tool_name, _session_id(sess_mod, kwargs), elapsed, success,
+                )
 
         return wrapper
 

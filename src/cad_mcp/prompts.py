@@ -104,6 +104,82 @@ Call `export_model` with the requested format(s):
 
 Report the file path and size to the user.
 
+## Multi-part designs (assemblies)
+
+Many real prints are more than one solid: a box and its lid, a bracket
+and a cover plate, a stand and a clip. Do NOT try to cram those into a
+single `result` solid — model them as separate parts.
+
+Use parts when any of these is true:
+- the pieces print separately, or in different orientations;
+- they need to fit together (a lid on a box, a peg in a hole);
+- the user asked for more than one object.
+
+The loop:
+
+1. `create_part(name="lid")` — creates the part and makes it active.
+   Names are lowercase `[a-z][a-z0-9_]{0,31}`. Maximum 16 parts; each
+   one multiplies render and validate cost, so do not create parts you
+   do not need.
+2. `execute_cad(...)` — writes to the **active part only**. Model each
+   part at the origin; do not offset it in the code.
+3. `set_active_part(name="box")` — switch targets. Check `list_parts`
+   if you lose track of which part is active.
+4. `position_part(name="lid", translate=[0, 0, 20])` — place it in the
+   assembly. This is applied at render/export time and is NOT baked into
+   the geometry, so you can reposition without re-running `execute_cad`.
+
+### Verifying a fit before you export
+
+This is the part that catches real mistakes:
+
+- `validate_mesh` checks every part and additionally reports
+  **interference** — any pair whose solids overlap by more than
+  0.01 mm3. Interference means the parts cannot physically assemble.
+  Fix it by changing geometry or `position_part`.
+- `measure(what="clearance", parts=["lid", "box"])` returns the minimum
+  distance between two parts. Use it to confirm a real gap:
+  - `0` means touching (or interfering — check `validate_mesh`),
+  - a sliding fit wants roughly 0.2-0.3 mm per side,
+  - a press fit wants a small negative clearance (interference), which
+    `validate_mesh` will correctly flag — that is expected for press
+    fits, and is the one case where interference is not a bug.
+
+### Rendering and exporting an assembly
+
+- `render_views` draws **all** parts in one scene, each in its own
+  colour. Render after positioning, not just after modelling — the
+  render is how you confirm the parts sit where you meant.
+- `render_views(parts=["lid"])` isolates one part when a detail is
+  hidden inside the assembly.
+- `export_model(format="stl")` writes one file per part plus a combined
+  assembly file. Per-part files are what a slicer wants; the combined
+  file is for checking the whole thing. STEP export writes a single file
+  with all parts named.
+
+## Organic shapes: `gen_ai_mesh`
+
+CadQuery is for precise, parametric geometry. It is a poor fit for
+organic shapes — figurines, characters, terrain, animals. For those,
+`gen_ai_mesh(prompt="a chess pawn")` generates a mesh instead.
+
+Hard constraints — read these before using it:
+
+- The result is a **tessellated B-rep**: triangles, not NURBS surfaces.
+  `fillet()`, `chamfer()` and `shell()` **will fail** on it. Do not try.
+- The geometry is **not reproducible from code**. It exists only as a
+  mesh, so `execute_cad` will refuse to run against that part rather
+  than silently destroy it. To combine an AI mesh with parametric
+  geometry, put them in **separate parts**.
+- It needs `MESHY_API_KEY`, calls a paid external API, and takes
+  15-120 seconds. Prefer CadQuery whenever the shape can be described
+  with dimensions.
+- `render_views`, `validate_mesh` and `export_model` all work on the
+  result as normal.
+
+Use it for the organic part of a design and CadQuery for everything that
+has to be dimensionally correct.
+
 ## Iteration rules
 - You may loop Steps 1-3 as many times as needed.
 - Target: a correct, validated model in 4 or fewer iterations.

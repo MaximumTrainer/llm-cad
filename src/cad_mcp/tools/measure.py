@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
@@ -166,6 +166,7 @@ def register(mcp: MCPServer) -> None:
         from_selector: str | None = None,
         to_selector: str | None = None,
         parts: list[str] | None = None,
+        ctx: Context | None = None,
     ) -> str:
         """Take numeric measurements of the current model.
 
@@ -181,7 +182,7 @@ def register(mcp: MCPServer) -> None:
         Returns:
             JSON with the requested measurement in mm or mm³.
         """
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
 
         what = what.lower().strip()
         valid = ("bbox", "volume", "faces", "distance", "clearance")

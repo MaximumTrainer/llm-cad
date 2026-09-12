@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import export, session
 from cad_mcp._logging import logged_tool
@@ -23,6 +23,7 @@ def register(mcp: MCPServer) -> None:
         filename: str | None = None,
         tolerance: float = 0.1,
         parts: str | list[str] | None = None,
+        ctx: Context | None = None,
     ) -> str:
         """Export the current model to a file.
 
@@ -46,7 +47,7 @@ def register(mcp: MCPServer) -> None:
             JSON with ``path``, ``size_bytes``, and ``format`` for each
             exported file.
         """
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
         fmt = format.lower()
 
         if fmt not in export.EXPORTERS:

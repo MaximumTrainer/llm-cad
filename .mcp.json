@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cad-mcp": {
+      "command": "uv",
+      "args": ["run", "cad-mcp"],
+      "env": {}
+    }
+  }
+}

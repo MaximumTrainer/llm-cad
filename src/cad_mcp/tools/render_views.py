@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ImageContent, TextContent
 
 from cad_mcp import render, session
@@ -19,6 +19,7 @@ def register(mcp: MCPServer) -> None:
         width: int = 800,
         height: int = 600,
         parts: list[str] | None = None,
+        ctx: Context | None = None,
     ) -> list[TextContent | ImageContent]:
         """Render the current assembly as a multi-view PNG grid.
 
@@ -33,7 +34,7 @@ def register(mcp: MCPServer) -> None:
             height: Total image height in pixels (default 600).
             parts:  Part names to render. Default: all parts with geometry.
         """
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
 
         if parts is not None:
             bad = [n for n in parts if n not in sess.parts]

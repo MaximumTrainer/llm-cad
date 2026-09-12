@@ -19,6 +19,10 @@ def register(mcp: MCPServer) -> None:
         mime_type="text/x-python",
     )
     def current_code() -> str:
+        # NOTE: the SDK refuses Context injection for a static (non-template)
+        # resource, so this cannot be scoped to the calling MCP session. It
+        # therefore reads the default (stdio) session. Over HTTP, use the
+        # `list_session` tool instead — that one *is* session-scoped.
         sess = session.get_or_create()
         code = sess.accumulated_code()
         if not code:

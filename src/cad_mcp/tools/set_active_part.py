@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
@@ -13,7 +13,9 @@ from cad_mcp._logging import logged_tool
 def register(mcp: MCPServer) -> None:
     @mcp.tool()
     @logged_tool("set_active_part")
-    def set_active_part(name: str) -> str:
+    def set_active_part(name: str,
+        ctx: Context | None = None,
+    ) -> str:
         """Switch the active part so ``execute_cad`` writes to it.
 
         Args:
@@ -22,7 +24,7 @@ def register(mcp: MCPServer) -> None:
         Returns:
             JSON confirmation with active part details.
         """
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
 
         if name not in sess.parts:
             names = list(sess.parts.keys())

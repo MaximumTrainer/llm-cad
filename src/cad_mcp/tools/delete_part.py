@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
@@ -13,7 +13,9 @@ from cad_mcp._logging import logged_tool
 def register(mcp: MCPServer) -> None:
     @mcp.tool()
     @logged_tool("delete_part")
-    def delete_part(name: str) -> str:
+    def delete_part(name: str,
+        ctx: Context | None = None,
+    ) -> str:
         """Delete a part from the assembly.
 
         Cannot delete the last remaining part.
@@ -24,7 +26,7 @@ def register(mcp: MCPServer) -> None:
         Returns:
             JSON confirmation with the remaining parts.
         """
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
 
         if name not in sess.parts:
             names = list(sess.parts.keys())

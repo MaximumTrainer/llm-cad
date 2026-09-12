@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
@@ -17,6 +17,7 @@ def register(mcp: MCPServer) -> None:
         name: str,
         translate: list[float] | None = None,
         rotate: list[float] | None = None,
+        ctx: Context | None = None,
     ) -> str:
         """Set the position of a part in the assembly.
 
@@ -33,7 +34,7 @@ def register(mcp: MCPServer) -> None:
         Returns:
             JSON confirmation with the new position.
         """
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
 
         if name not in sess.parts:
             names = list(sess.parts.keys())

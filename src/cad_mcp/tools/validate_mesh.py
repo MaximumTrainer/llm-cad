@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session, validate
 from cad_mcp._logging import logged_tool
@@ -17,6 +17,7 @@ def register(mcp: MCPServer) -> None:
         min_wall_mm: float = 1.2,
         max_overhang_deg: float = 45.0,
         part: str | None = None,
+        ctx: Context | None = None,
     ) -> str:
         """Validate the current model for printability.
 
@@ -37,7 +38,7 @@ def register(mcp: MCPServer) -> None:
             JSON report with all validation results and a list of
             issues found.  ``printable`` is true when no issues.
         """
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
 
         if part is not None:
             if part not in sess.parts:

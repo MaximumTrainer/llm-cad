@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import json
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
+from cad_mcp._logging import logged_tool
 
 
 def register(mcp: MCPServer) -> None:
     @mcp.tool()
-    def list_session() -> str:
+    @logged_tool("list_session")
+    def list_session(ctx: Context) -> str:
         """Return the current session's parts, code history, and exports.
 
         Useful for recovering context after a long conversation or when
@@ -18,5 +20,5 @@ def register(mcp: MCPServer) -> None:
         the active part, all parts with their positions and colors,
         and the code history for the active part.
         """
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
         return json.dumps(sess.summary(), indent=2)

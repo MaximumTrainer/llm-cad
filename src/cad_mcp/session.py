@@ -9,9 +9,23 @@ import os
 import re
 import shutil
 import tempfile
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+SESSION_ID_HEADER = "mcp-session-id"
+DEFAULT_SESSION_ID = "default"
+
+
+def idle_timeout_s() -> float:
+    """Seconds an unused session is kept before eviction (SPEC 10.1 H4)."""
+    raw = os.environ.get("CAD_MCP_SESSION_IDLE_TIMEOUT_S", "").strip()
+    try:
+        return float(raw) if raw else 300.0
+    except ValueError:
+        return 300.0
 
 PART_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
@@ -59,10 +73,17 @@ class Session:
     parts: dict[str, Part] = field(default_factory=dict)
     active_part: str = "main"
     exports: list[dict[str, str]] = field(default_factory=list)
+    last_used: float = field(default_factory=time.monotonic)
+    # Tools are dispatched on a thread pool, so two calls against one
+    # session can interleave. Mutating tools take this lock (CAD-008).
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
     def __post_init__(self) -> None:
         if not self.parts:
             self.parts["main"] = Part(name="main")
+
+    def touch(self) -> None:
+        self.last_used = time.monotonic()
 
     def get_active_part(self) -> Part:
         return self.parts[self.active_part]
@@ -121,15 +142,68 @@ class Session:
 
 
 _sessions: dict[str, Session] = {}
+_sessions_lock = threading.RLock()
 
 _SESSION_PREFIX = "cad-mcp-"
 
 
-def get_or_create(session_id: str = "default") -> Session:
-    if session_id not in _sessions:
-        tmpdir = Path(tempfile.mkdtemp(prefix=_SESSION_PREFIX))
-        _sessions[session_id] = Session(session_id=session_id, tmpdir=tmpdir)
-    return _sessions[session_id]
+def resolve_id(ctx: Any = None) -> str:
+    """Identify the MCP session behind a tool call.
+
+    Over stdio there is one client and one session. Over HTTP each client
+    gets its own `Mcp-Session-Id`, and sharing state between them would
+    leak one user's model — and code — into another's (SPEC 10.1 H4).
+    """
+    if ctx is None:
+        return DEFAULT_SESSION_ID
+    try:
+        headers = ctx.headers or {}
+    except Exception:
+        return DEFAULT_SESSION_ID
+    for key, value in headers.items():
+        if key.lower() == SESSION_ID_HEADER and value:
+            return str(value)
+    return DEFAULT_SESSION_ID
+
+
+def get_or_create(session_id: str = DEFAULT_SESSION_ID) -> Session:
+    with _sessions_lock:
+        evict_idle()
+        sess = _sessions.get(session_id)
+        if sess is None:
+            tmpdir = Path(tempfile.mkdtemp(prefix=_SESSION_PREFIX))
+            sess = Session(session_id=session_id, tmpdir=tmpdir)
+            _sessions[session_id] = sess
+        sess.touch()
+        return sess
+
+
+def for_context(ctx: Any = None) -> Session:
+    """The session belonging to this request. Use this from tools."""
+    return get_or_create(resolve_id(ctx))
+
+
+def evict_idle(now: float | None = None) -> list[str]:
+    """Drop sessions unused for longer than the idle timeout."""
+    timeout = idle_timeout_s()
+    if timeout <= 0:
+        return []
+    current = time.monotonic() if now is None else now
+    with _sessions_lock:
+        stale = [
+            sid
+            for sid, s in _sessions.items()
+            if current - s.last_used > timeout
+        ]
+        for sid in stale:
+            _sessions[sid].cleanup()
+            del _sessions[sid]
+    return stale
+
+
+def active_ids() -> list[str]:
+    with _sessions_lock:
+        return list(_sessions)
 
 
 def reset(session_id: str = "default") -> str:
