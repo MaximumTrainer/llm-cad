@@ -99,21 +99,30 @@ def register(mcp: MCPServer) -> None:
                 )
             ]
 
-        view_list = views or render.DEFAULT_VIEWS
+        try:
+            view_list = render.normalise_views(views)
+        except ValueError as exc:
+            return [TextContent(
+                type="text",
+                text=fail("ValueError", str(exc)),
+            )]
+        eff_w, eff_h, clamp_note = render.clamp_size(width, height)
         b64 = base64.b64encode(png_bytes).decode("ascii")
 
         rendered_names = [
             p.name for p in render_parts if sess.has_model(p.name)
         ]
+        detail = (
+            f"Rendered {len(view_list)} view(s): "
+            f"{', '.join(view_list)}  "
+            f"({eff_w}x{eff_h} px)  "
+            f"Parts: {', '.join(rendered_names)}  "
+            f"Backend: {render.active_backend()}"
+        )
+        if clamp_note:
+            detail += f"  ({clamp_note})"
+
         return [
             ImageContent(type="image", data=b64, mime_type="image/png"),
-            TextContent(
-                type="text",
-                text=(
-                    f"Rendered {len(view_list)} view(s): "
-                    f"{', '.join(view_list)}  "
-                    f"({width}x{height} px)  "
-                    f"Parts: {', '.join(rendered_names)}"
-                ),
-            ),
+            TextContent(type="text", text=detail),
         ]

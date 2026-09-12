@@ -57,8 +57,41 @@ class PartMesh:
     color: tuple[float, float, float]
 
 
+# Maximum grid size. CLAUDE.md caps the image at 800x600; larger images
+# cost render time for no extra information to the model.
+MAX_WIDTH = 1600
+MAX_HEIGHT = 1200
+MIN_WIDTH = 200
+MIN_HEIGHT = 150
+
+
+def forced_backend() -> str | None:
+    """`CAD_MCP_FORCE_BACKEND` = "pyrender" | "matplotlib", or unset.
+
+    Lets CI and the `render-check` skill exercise a specific backend
+    rather than silently testing whichever one happens to be installed.
+    """
+    import os
+
+    value = os.environ.get("CAD_MCP_FORCE_BACKEND", "").strip().lower()
+    return value or None
+
+
 def _check_pyrender() -> bool:
+    """Whether the pyrender/EGL backend can actually render.
+
+    Failures are logged at WARNING with the underlying exception. They
+    used to be swallowed, which made "pyrender is not installed"
+    indistinguishable from "EGL is misconfigured" — and since pyrender
+    was never a declared dependency, this returned False forever and the
+    whole pyrender path went unexecuted (CAD-011).
+    """
     global _HAS_PYRENDER
+
+    forced = forced_backend()
+    if forced == "matplotlib":
+        return False
+
     if _HAS_PYRENDER is not None:
         return _HAS_PYRENDER
     try:
@@ -67,12 +100,77 @@ def _check_pyrender() -> bool:
         os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
         import pyrender
 
-        _r = pyrender.OffscreenRenderer(64, 64)
-        _r.delete()
+        renderer = pyrender.OffscreenRenderer(64, 64)
+        renderer.delete()
         _HAS_PYRENDER = True
-    except Exception:
+    except Exception as exc:
+        if forced == "pyrender":
+            # Explicitly requested: fail loudly rather than fall back and
+            # pretend the pyrender path was tested.
+            msg = (
+                f"CAD_MCP_FORCE_BACKEND=pyrender but pyrender is "
+                f"unavailable: {type(exc).__name__}: {exc}"
+            )
+            raise RuntimeError(msg) from exc
+        logger.warning(
+            "pyrender/EGL unavailable (%s: %s); using the matplotlib "
+            "backend. Install the 'gpu' extra and a working EGL/OSMesa "
+            "for GPU rendering.",
+            type(exc).__name__,
+            exc,
+        )
         _HAS_PYRENDER = False
     return _HAS_PYRENDER
+
+
+def active_backend() -> str:
+    """Name of the backend that will be used, for reporting to the LLM."""
+    return "pyrender" if _check_pyrender() else "matplotlib"
+
+
+def grid_shape(n_views: int) -> tuple[int, int]:
+    """(rows, cols) for *n_views* cells, shared by both backends.
+
+    The pyrender path used to hardcode two columns, so a 1- or 3-view
+    request left blank quadrants and the two backends disagreed on
+    layout (CAD-010).
+    """
+    if n_views <= 1:
+        return 1, 1
+    if n_views == 2:
+        return 1, 2
+    cols = 2
+    rows = math.ceil(n_views / cols)
+    return rows, cols
+
+
+def normalise_views(views: Sequence[str] | None) -> list[str]:
+    """Validate, de-duplicate and order the requested views."""
+    if not views:
+        return list(DEFAULT_VIEWS)
+    seen: list[str] = []
+    for name in views:
+        key = str(name).strip().lower()
+        if key not in VIEW_ANGLES:
+            msg = (
+                f"Unknown view '{name}'. Choose from {list(VIEW_ANGLES)}."
+            )
+            raise ValueError(msg)
+        if key not in seen:
+            seen.append(key)
+    return seen
+
+
+def clamp_size(width: int, height: int) -> tuple[int, int, str | None]:
+    """Bound the image size. Returns (width, height, note-if-changed)."""
+    w = max(MIN_WIDTH, min(int(width), MAX_WIDTH))
+    h = max(MIN_HEIGHT, min(int(height), MAX_HEIGHT))
+    if (w, h) != (int(width), int(height)):
+        return w, h, (
+            f"size clamped from {int(width)}x{int(height)} to {w}x{h} "
+            f"(limits {MIN_WIDTH}x{MIN_HEIGHT}-{MAX_WIDTH}x{MAX_HEIGHT})"
+        )
+    return w, h, None
 
 
 # ------------------------------------------------------------------
@@ -238,55 +336,6 @@ def _setup_axes(
     _draw_triad(ax, center, half_span)
 
 
-def _render_matplotlib(
-    verts: NDArray[np.float64],
-    faces: NDArray[np.int32],
-    views: Sequence[str],
-    width: int,
-    height: int,
-) -> bytes:
-    import matplotlib as mpl
-
-    mpl.use("Agg")
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d.art3d import (  # type: ignore[import-untyped]
-        Poly3DCollection,
-    )
-
-    fc = _face_colors(verts, faces)
-    polygons = verts[faces]
-
-    mins = verts.min(axis=0)
-    maxs = verts.max(axis=0)
-    center = (mins + maxs) / 2.0
-    half_span = float(max(maxs - mins)) * 0.65
-
-    n = len(views)
-    cols = 2 if n > 1 else 1
-    rows = math.ceil(n / cols)
-    dpi = 100
-    fig = plt.figure(
-        figsize=(width / dpi, height / dpi), dpi=dpi, facecolor="white"
-    )
-
-    for idx, name in enumerate(views):
-        ax: Any = fig.add_subplot(rows, cols, idx + 1, projection="3d")
-
-        pc = Poly3DCollection(polygons, linewidths=0.15)
-        pc.set_facecolor(fc)
-        pc.set_edgecolor((0.3, 0.3, 0.3, 0.12))
-        ax.add_collection3d(pc)
-
-        _setup_axes(ax, name, center, half_span)
-
-    fig.tight_layout(pad=0.3)
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, facecolor="white")
-    plt.close(fig)
-    return buf.getvalue()
-
-
 def _render_assembly_matplotlib(
     part_meshes: Sequence[PartMesh],
     views: Sequence[str],
@@ -298,7 +347,9 @@ def _render_assembly_matplotlib(
 
     mpl.use("Agg")
     import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    from mpl_toolkits.mplot3d.art3d import (  # type: ignore[import-untyped]
+        Poly3DCollection,
+    )
 
     all_verts = np.vstack([pm.verts for pm in part_meshes])
     mins = all_verts.min(axis=0)
@@ -306,9 +357,7 @@ def _render_assembly_matplotlib(
     center = (mins + maxs) / 2.0
     half_span = float(max(maxs - mins)) * 0.65
 
-    n = len(views)
-    cols = 2 if n > 1 else 1
-    rows = math.ceil(n / cols)
+    rows, cols = grid_shape(len(views))
     dpi = 100
     fig = plt.figure(
         figsize=(width / dpi, height / dpi), dpi=dpi, facecolor="white"
@@ -367,6 +416,96 @@ def _draw_triad(
 # ------------------------------------------------------------------
 
 
+def _annotate_cell(
+    image: Any,
+    name: str,
+    mins: NDArray[np.float64],
+    maxs: NDArray[np.float64],
+    ortho_extent: float | None,
+) -> None:
+    """Draw the title, axis labels and mm ticks onto one pyrender cell.
+
+    SPEC 5.1 requires axes and mm scale ticks. The pyrender path drew
+    neither, so the preferred backend gave the model a picture with no
+    sense of scale — the exact failure `measure` exists to catch and a
+    render is supposed to prevent (CAD-010).
+
+    For an orthographic view the mapping from millimetres to pixels is
+    exact (`xmag`/`ymag` define the visible half-extent), so real ticks
+    can be drawn. The perspective iso view gets a bounding-box caption
+    instead of ticks that would be wrong.
+    """
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(image)
+    w, h = image.size
+    ink = (40, 40, 40)
+    faint = (120, 120, 120)
+
+    draw.text((6, 4), name.capitalize(), fill=ink)
+
+    dims = maxs - mins
+    if ortho_extent is None or ortho_extent <= 0:
+        draw.text(
+            (6, h - 14),
+            f"bbox {dims[0]:.1f} x {dims[1]:.1f} x {dims[2]:.1f} mm",
+            fill=ink,
+        )
+        _draw_triad_2d(draw, w, h)
+        return
+
+    # Horizontal/vertical world axes visible in this view.
+    h_axis, v_axis = _view_axes(name)
+    labels = "XYZ"
+
+    # Orthographic camera: full visible width is 2 * xmag millimetres.
+    mm_per_px_x = (2.0 * ortho_extent) / max(w, 1)
+    mm_per_px_y = (2.0 * ortho_extent) / max(h, 1)
+    centre = (mins + maxs) / 2.0
+
+    lo_x = centre[h_axis] - (w / 2.0) * mm_per_px_x
+    hi_x = centre[h_axis] + (w / 2.0) * mm_per_px_x
+    lo_y = centre[v_axis] - (h / 2.0) * mm_per_px_y
+    hi_y = centre[v_axis] + (h / 2.0) * mm_per_px_y
+
+    baseline = h - 16
+    draw.line([(0, baseline), (w, baseline)], fill=faint)
+    for value in _nice_ticks(lo_x, hi_x, max_ticks=5):
+        px = int((value - lo_x) / max(hi_x - lo_x, 1e-9) * w)
+        draw.line([(px, baseline - 4), (px, baseline + 4)], fill=ink)
+        draw.text((px + 2, baseline + 3), f"{value:g}", fill=ink)
+
+    draw.line([(18, 0), (18, baseline)], fill=faint)
+    for value in _nice_ticks(lo_y, hi_y, max_ticks=4):
+        # Screen y grows downward.
+        py = int(baseline - (value - lo_y) / max(hi_y - lo_y, 1e-9) * baseline)
+        draw.line([(14, py), (22, py)], fill=ink)
+        draw.text((24, py - 6), f"{value:g}", fill=ink)
+
+    draw.text((w - 58, baseline + 3), f"{labels[h_axis]} mm", fill=ink)
+    draw.text((2, 16), f"{labels[v_axis]} mm", fill=ink)
+
+
+def _view_axes(name: str) -> tuple[int, int]:
+    """(horizontal, vertical) world axis indices shown by a named view."""
+    return {
+        "front": (0, 2),  # looking along -Y: X right, Z up
+        "right": (1, 2),  # looking along -X: Y right, Z up
+        "top": (0, 1),    # looking down -Z: X right, Y up
+    }.get(name, (0, 2))
+
+
+def _draw_triad_2d(draw: Any, w: int, h: int) -> None:
+    """A small X/Y/Z legend for the perspective view."""
+    ox, oy, length = 16, h - 26, 18
+    draw.line([(ox, oy), (ox + length, oy)], fill=(200, 40, 40), width=2)
+    draw.text((ox + length + 2, oy - 6), "X", fill=(200, 40, 40))
+    draw.line([(ox, oy), (ox + 12, oy - 12)], fill=(40, 150, 40), width=2)
+    draw.text((ox + 14, oy - 22), "Y", fill=(40, 150, 40))
+    draw.line([(ox, oy), (ox, oy - length)], fill=(40, 40, 200), width=2)
+    draw.text((ox + 2, oy - length - 12), "Z", fill=(40, 40, 200))
+
+
 def _pyrender_camera_pose(
     name: str,
     center: NDArray[np.float64],
@@ -399,109 +538,36 @@ def _pyrender_camera_pose(
     return pose
 
 
-def _render_pyrender(
-    verts: NDArray[np.float64],
-    faces: NDArray[np.int32],
-    views: Sequence[str],
-    width: int,
-    height: int,
-) -> bytes:
-    import pyrender
-    import trimesh
-    from PIL import Image
-
-    cell_w = width // 2
-    cell_h = height // 2
-
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-    mesh.fix_normals()
-
-    pr_mesh = pyrender.Mesh.from_trimesh(
-        mesh,
-        smooth=True,
-        material=pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=[0.55, 0.65, 0.82, 1.0],
-            metallicFactor=0.15,
-            roughnessFactor=0.6,
-        ),
-    )
-
-    mins = verts.min(axis=0)
-    maxs = verts.max(axis=0)
-    center = (mins + maxs) / 2.0
-    diag = float(np.linalg.norm(maxs - mins))
-    cam_dist = diag * 1.8
-
-    composite = Image.new("RGB", (width, height), (255, 255, 255))
-    renderer = pyrender.OffscreenRenderer(cell_w, cell_h)
-
-    try:
-        for idx, name in enumerate(views):
-            scene = pyrender.Scene(
-                bg_color=[1.0, 1.0, 1.0, 1.0],
-                ambient_light=[0.3, 0.3, 0.3],
-            )
-            scene.add(pr_mesh)
-            scene.add(
-                pyrender.DirectionalLight(color=[1, 1, 1], intensity=3.0),
-                pose=np.eye(4),
-            )
-
-            pose = _pyrender_camera_pose(name, center, cam_dist)
-
-            if name == "iso":
-                cam: Any = pyrender.PerspectiveCamera(
-                    yfov=math.radians(40)
-                )
-            else:
-                cam = pyrender.OrthographicCamera(
-                    xmag=diag * 0.6, ymag=diag * 0.6
-                )
-            scene.add(cam, pose=pose)
-
-            color_img, _ = renderer.render(scene)
-            cell = Image.fromarray(color_img)
-
-            col = idx % 2
-            row = idx // 2
-            composite.paste(cell, (col * cell_w, row * cell_h))
-    finally:
-        renderer.delete()
-
-    buf = io.BytesIO()
-    composite.save(buf, format="PNG")
-    return buf.getvalue()
-
-
 def _render_assembly_pyrender(
     part_meshes: Sequence[PartMesh],
     views: Sequence[str],
     width: int,
     height: int,
 ) -> bytes:
-    """Render multiple parts with distinct colors (pyrender)."""
+    """Render parts with distinct colors via pyrender, then annotate."""
     import pyrender
     import trimesh
     from PIL import Image
 
-    cell_w = width // 2
-    cell_h = height // 2
+    rows, cols = grid_shape(len(views))
+    cell_w = width // cols
+    cell_h = height // rows
 
     pr_meshes = []
     for pm in part_meshes:
         mesh = trimesh.Trimesh(vertices=pm.verts, faces=pm.faces)
         mesh.fix_normals()
-        rgba = [*pm.color, 1.0]
-        pr_mesh = pyrender.Mesh.from_trimesh(
-            mesh,
-            smooth=True,
-            material=pyrender.MetallicRoughnessMaterial(
-                baseColorFactor=rgba,
-                metallicFactor=0.15,
-                roughnessFactor=0.6,
-            ),
+        pr_meshes.append(
+            pyrender.Mesh.from_trimesh(
+                mesh,
+                smooth=True,
+                material=pyrender.MetallicRoughnessMaterial(
+                    baseColorFactor=[*pm.color, 1.0],
+                    metallicFactor=0.15,
+                    roughnessFactor=0.6,
+                ),
+            )
         )
-        pr_meshes.append(pr_mesh)
 
     all_verts = np.vstack([pm.verts for pm in part_meshes])
     mins = all_verts.min(axis=0)
@@ -509,6 +575,7 @@ def _render_assembly_pyrender(
     center = (mins + maxs) / 2.0
     diag = float(np.linalg.norm(maxs - mins))
     cam_dist = diag * 1.8
+    ortho_mag = diag * 0.6
 
     composite = Image.new("RGB", (width, height), (255, 255, 255))
     renderer = pyrender.OffscreenRenderer(cell_w, cell_h)
@@ -527,22 +594,23 @@ def _render_assembly_pyrender(
             )
 
             pose = _pyrender_camera_pose(name, center, cam_dist)
-
             if name == "iso":
-                cam: Any = pyrender.PerspectiveCamera(
-                    yfov=math.radians(40)
-                )
+                cam: Any = pyrender.PerspectiveCamera(yfov=math.radians(40))
+                extent: float | None = None
             else:
                 cam = pyrender.OrthographicCamera(
-                    xmag=diag * 0.6, ymag=diag * 0.6
+                    xmag=ortho_mag, ymag=ortho_mag
                 )
+                extent = ortho_mag
             scene.add(cam, pose=pose)
 
             color_img, _ = renderer.render(scene)
             cell = Image.fromarray(color_img)
+            # SPEC 5.1: axes and mm ticks, which this backend omitted.
+            _annotate_cell(cell, name, mins, maxs, extent)
 
-            col = idx % 2
-            row = idx // 2
+            col = idx % cols
+            row = idx // cols
             composite.paste(cell, (col * cell_w, row * cell_h))
     finally:
         renderer.delete()
@@ -563,26 +631,19 @@ def render_views(
     width: int = 800,
     height: int = 600,
 ) -> bytes:
-    """Render a multi-view PNG of the shape at *brep_path*.
+    """Render a single shape. Thin wrapper over :func:`render_assembly`.
 
-    Returns raw PNG bytes.  Tries pyrender/EGL first, then matplotlib.
+    Kept because it is a convenient entry point, but it no longer has its
+    own rendering code: the duplicate single-part path was what the
+    golden-image test exercised while the tool called the assembly path,
+    so the one test guarding the product's core output guarded a function
+    no user could reach (CAD-013).
     """
-    if views is None:
-        views = DEFAULT_VIEWS
-
-    bad = [v for v in views if v not in VIEW_ANGLES]
-    if bad:
-        msg = f"Unknown views: {bad}. Choose from {list(VIEW_ANGLES)}"
-        raise ValueError(msg)
-
     verts, faces = load_and_tessellate(brep_path)
-
-    if _check_pyrender():
-        logger.info("Using pyrender backend")
-        return _render_pyrender(verts, faces, views, width, height)
-
-    logger.info("Using matplotlib backend (pyrender/EGL unavailable)")
-    return _render_matplotlib(verts, faces, views, width, height)
+    mesh = PartMesh(
+        verts=verts, faces=faces, color=COLOR_PALETTE["steel"]
+    )
+    return render_assembly([mesh], views, width, height)
 
 
 def render_assembly(
@@ -591,21 +652,13 @@ def render_assembly(
     width: int = 800,
     height: int = 600,
 ) -> bytes:
-    """Render multiple parts with distinct colors as a multi-view PNG.
-
-    Returns raw PNG bytes.
-    """
-    if views is None:
-        views = DEFAULT_VIEWS
-
-    bad = [v for v in views if v not in VIEW_ANGLES]
-    if bad:
-        msg = f"Unknown views: {bad}. Choose from {list(VIEW_ANGLES)}"
-        raise ValueError(msg)
+    """Render parts with distinct colors as a multi-view PNG."""
+    chosen = normalise_views(views)
+    width, height, _ = clamp_size(width, height)
 
     if _check_pyrender():
         logger.info("Using pyrender backend (assembly)")
-        return _render_assembly_pyrender(part_meshes, views, width, height)
+        return _render_assembly_pyrender(part_meshes, chosen, width, height)
 
     logger.info("Using matplotlib backend (assembly)")
-    return _render_assembly_matplotlib(part_meshes, views, width, height)
+    return _render_assembly_matplotlib(part_meshes, chosen, width, height)

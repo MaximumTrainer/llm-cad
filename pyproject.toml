@@ -4,11 +4,42 @@ version = "0.1.0"
 description = "MCP server that lets any LLM design 3D models from text via CadQuery"
 requires-python = ">=3.11"
 dependencies = [
-    "cadquery>=2.8.0",
+    # Geometry kernel. Upper-bounded deliberately: CLAUDE.md warns that
+    # rendering and export are version-sensitive, and an unbounded
+    # `>=2.8.0` is how a breaking OCP arrives unannounced. Bump via the
+    # `pin-bump` skill, which runs the golden and determinism gates.
+    "cadquery>=2.8.0,<3",
+    # MCP SDK v2. The code uses `MCPServer` and `input_schema`, neither of
+    # which exists in v1, so the old `>=1.9.0` range could resolve to
+    # something that fails at import.
+    "mcp[cli]>=2.0,<3",
+    # Mesh validation and export.
+    "manifold3d>=3.5.2,<4",
+    "trimesh>=5.0.0,<6",
+    # Imported directly by render.py and validate.py. These previously
+    # arrived only transitively (cadquery -> vtk -> matplotlib, and
+    # cadquery -> scipy), so a VTK restructure would have broken
+    # rendering and validation at runtime in a user's session.
+    "matplotlib>=3.8",
+    "pillow>=10",
+    "scipy>=1.11",
+    "numpy>=1.26",
+    # HTTP transport and the Meshy client. starlette and uvicorn are
+    # imported directly by server.py.
     "httpx>=0.28",
-    "manifold3d>=3.5.2",
-    "mcp[cli]>=1.9.0",
-    "trimesh>=5.0.0",
+    "starlette>=0.37",
+    "uvicorn>=0.30",
+    # transport.py imports AnyHttpUrl directly.
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+# The pyrender/EGL renderer. Optional because matplotlib is the supported
+# default: pyrender was never installed here, so `_check_pyrender()`
+# always returned False and the whole pyrender path had never executed.
+gpu = [
+    "pyrender>=0.1.45",
+    "PyOpenGL>=3.1.0",
 ]
 
 [project.scripts]

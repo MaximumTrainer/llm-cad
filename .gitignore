@@ -35,3 +35,6 @@ Thumbs.db
 
 # Exported models (CAD_MCP_OUTPUT_DIR)
 cad-mcp-output/
+
+# Golden render inspection output
+golden-render.png
