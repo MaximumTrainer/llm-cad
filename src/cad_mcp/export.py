@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from cad_mcp.paths import safe_output_path
+from cad_mcp.paths import unique_output_path
 from cad_mcp.render import TESS_ANGULAR, TESS_LINEAR, load_and_tessellate
 
 
@@ -259,7 +259,7 @@ def export_model(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     # Re-validated here so no caller can bypass the guard (CAD-003).
-    output_path = safe_output_path(output_dir, filename)
+    output_path = unique_output_path(output_dir, filename)
 
     if fmt == "step":
         export_step(brep_path, output_path)

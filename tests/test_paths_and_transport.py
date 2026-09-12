@@ -226,3 +226,25 @@ def test_os_environ_is_not_leaked_into_output_dir() -> None:
     """Guard against a stray absolute path from a bad env value."""
     assert os.environ.get("CAD_MCP_OUTPUT_DIR")
     assert session.output_root().is_absolute()
+
+
+def test_export_collisions_do_not_overwrite() -> None:
+    """A second export of the same name must not destroy the first."""
+
+    async def scenario() -> tuple[str, str]:
+        await mcp.call_tool("execute_cad", {"code": BOX})
+        first = await mcp.call_tool(
+            "export_model", {"format": "stl", "filename": "dupe"}
+        )
+        second = await mcp.call_tool(
+            "export_model", {"format": "stl", "filename": "dupe"}
+        )
+        return (
+            json.loads(first.content[0].text)["path"],  # type: ignore[union-attr]
+            json.loads(second.content[0].text)["path"],  # type: ignore[union-attr]
+        )
+
+    first, second = anyio.run(scenario)
+    assert first != second, "Second export silently overwrote the first"
+    assert Path(first).exists() and Path(second).exists()
+    assert Path(second).stem == "dupe-1"

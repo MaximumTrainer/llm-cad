@@ -10,7 +10,7 @@ from cad_mcp import export, session
 from cad_mcp._logging import logged_tool
 from cad_mcp.paths import (
     UnsafeFilename,
-    safe_output_path,
+    unique_output_path,
     validate_filename,
 )
 
@@ -146,7 +146,7 @@ def _export_multi(
                 "error": f"{type(exc).__name__}: {exc}",
             })
 
-    assembly_path = safe_output_path(
+    assembly_path = unique_output_path(
         output_dir, f"{base}_assembly{ext}"
     )
     assembly_result: dict[str, Any] = {}

@@ -51,6 +51,25 @@ def validate_filename(name: str) -> str:
     return name
 
 
+def unique_output_path(output_dir: Path, filename: str) -> Path:
+    """Like :func:`safe_output_path`, but never overwrites.
+
+    A silent overwrite loses the previous export with no signal, so a
+    collision gets a deterministic ``-1``, ``-2`` … suffix instead.
+    """
+    path = safe_output_path(output_dir, filename)
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    for n in range(1, 1000):
+        candidate = path.with_name(f"{stem}-{n}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise UnsafeFilename(
+        f"Too many files named {filename!r} in {output_dir}."
+    )
+
+
 def safe_output_path(output_dir: Path, filename: str) -> Path:
     """Validate *filename* and resolve it inside *output_dir*.
 
