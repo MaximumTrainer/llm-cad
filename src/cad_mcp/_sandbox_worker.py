@@ -7,151 +7,254 @@ JSON line to stdout with the result.
 """
 from __future__ import annotations
 
-import builtins
 import io
 import json
 import os
 import sys
 import traceback
+from typing import Any
+
+_RESULT_PATH = os.environ.get("CAD_MCP_RESULT_OUT", "")
 
 
-def _block_sockets() -> None:
-    import socket as _sock
+def emit(payload: dict[str, object]) -> None:
+    """Write the result where the parent can read it unambiguously.
 
-    class _Blocked:
-        def __init__(self, *a: object, **kw: object) -> None:
-            raise OSError("Network access is disabled in the CAD sandbox")
-
-    _sock.socket = _Blocked  # type: ignore[assignment,misc]
-
-
-def _block_dangerous_os() -> None:
-    from collections.abc import Callable
-
-    def _denied(name: str) -> Callable[..., None]:
-        def _raise(*a: object, **kw: object) -> None:
-            raise PermissionError(f"{name}() is blocked in the CAD sandbox")
-
-        return _raise
-
-    for fn in (
-        "system",
-        "popen",
-        "execl",
-        "execle",
-        "execlp",
-        "execlpe",
-        "execv",
-        "execve",
-        "execvp",
-        "execvpe",
-        "spawnl",
-        "spawnle",
-        "spawnlp",
-        "spawnlpe",
-        "spawnv",
-        "spawnve",
-        "spawnvp",
-        "spawnvpe",
-    ):
-        if hasattr(os, fn):
-            setattr(os, fn, _denied(fn))
+    stdout is shared with anything CadQuery, VTK or OCP decide to
+    print ('VTK not installed' is a real example), so using it as the
+    result channel is the stdout-corruption hazard PLAN warns about.
+    A dedicated file has no such collisions.
+    """
+    blob = json.dumps(payload)
+    if _RESULT_PATH:
+        with open(_RESULT_PATH, "w", encoding="utf-8") as fh:
+            fh.write(blob)
+    print(blob)
 
 
-def _install_import_restriction() -> None:
-    allowed_top = frozenset({"cadquery", "math", "numpy"})
-    denied_top = frozenset(
-        {
-            "subprocess",
-            "multiprocessing",
-            "ctypes",
-            "shutil",
-            "http",
-            "urllib",
-            "requests",
-            "webbrowser",
-            "xmlrpc",
-            "ftplib",
-            "smtplib",
-            "poplib",
-            "imaplib",
-            "socketserver",
-            "asyncio",
-            "concurrent",
-        }
-    )
-    snapshot = frozenset(sys.modules.keys())
-    real_import = builtins.__import__
+# (matcher, hint) pairs, tried in order. A table rather than a chain of
+# ifs so adding a rule is a one-line change.
+#
+# Written because the live-LLM test showed a model make 16 tool calls and
+# never recover: "Cannot find a solid on the stack or in the parent chain"
+# fired seven times with no hint attached, so each attempt gave it no new
+# information (CAD-034). Hints are prescriptive — what to do next — not
+# descriptive.
+_HINTS: tuple[tuple[str, str], ...] = (
+    (
+        "nth element of an empty list",
+        "The chain is empty: a selector such as .faces()/.edges() "
+        "matched nothing, or there is no solid yet. Build geometry first "
+        "with .box()/.extrude()/.revolve(), and check the selector with "
+        "measure(what='faces').",
+    ),
+    (
+        "supported names are",
+        "Invalid plane name. Use 'XY', 'XZ', 'YZ' (or 'front', 'top', "
+        "'right'). Selectors are different: '>Z', '<Z', '|Z', '#Z'.",
+    ),
+    (
+        "cannot find a solid on the stack",
+        "The chain has no solid yet: .faces()/.workplane()/.hole()/"
+        ".shell() need an existing solid. Build one first with .box(), "
+        ".extrude() or .revolve(), and keep a single chain rather than "
+        "reassigning `result` from a fresh cq.Workplane().",
+    ),
+    (
+        "cannot find a solid",
+        "No solid in the chain. Create geometry with .box(), .extrude() "
+        "or .revolve() before selecting faces or cutting holes.",
+    ),
+    (
+        "expected {'xy' | 'xz'",
+        "Invalid plane or selector string. Planes are 'XY', 'XZ', 'YZ'. "
+        "Selectors look like '>Z', '<Z', '|Z', '#Z', '>X[1]'.",
+    ),
+    (
+        "line continuation character",
+        "The code contains stray escape characters. Send plain Python "
+        "source, not an escaped string: real newlines, no backslash-n.",
+    ),
+    (
+        "unexpected character after line continuation",
+        "The code contains stray escape characters. Send plain Python "
+        "source with real newlines.",
+    ),
+    (
+        "brep_api",
+        "An OCP kernel operation failed. Check fillet/chamfer radii "
+        "against the available edge length, and make sure boolean "
+        "operands actually overlap.",
+    ),
+    (
+        "standard_nullobject",
+        "An operation produced an empty shape. A boolean whose operands "
+        "do not overlap, or a cut that removed everything, gives a null "
+        "result.",
+    ),
+)
 
-    def restricted(
-        name: str,
-        globals: dict[str, object] | None = None,
-        locals: dict[str, object] | None = None,
-        fromlist: tuple[str, ...] = (),
-        level: int = 0,
-    ) -> object:
-        if level != 0:
-            return real_import(name, globals, locals, fromlist, level)
-        top = name.split(".")[0]
-        if top in denied_top:
-            raise ImportError(
-                f"Import of '{name}' is not allowed in the sandbox."
-            )
-        if top in allowed_top or top in snapshot:
-            return real_import(name, globals, locals, fromlist, level)
-        raise ImportError(
-            f"Import of '{name}' is not allowed. "
-            f"Available modules: cadquery, math, numpy."
-        )
+_FILLET_WORDS = ("radius", "exceed", "impossible", "failed", "command not done")
+_CHAMFER_WORDS = ("distance", "exceed", "failed", "command not done")
 
-    builtins.__import__ = restricted  # type: ignore[assignment]
+# Methods LLMs commonly hallucinate, and what they usually meant.
+_METHOD_SUGGESTIONS = {
+    "pushtotop": "pushPoints",
+    "cutthrough": "cutThruAll",
+    "cutout": "cutBlind or cut",
+    "addhole": "hole or cboreHole",
+    "makebox": "box",
+    "extrudelinear": "extrude",
+}
 
 
-def _add_hint(msg: str, snippet: str | None = None) -> str | None:
+def _workplane_suggestions(name: str) -> str:
+    """Near-matches for a hallucinated Workplane method."""
+    lowered = name.lower()
+    if lowered in _METHOD_SUGGESTIONS:
+        return _METHOD_SUGGESTIONS[lowered]
+    try:
+        import difflib
+
+        import cadquery
+
+        candidates = [
+            attr
+            for attr in dir(cadquery.Workplane)
+            if not attr.startswith("_")
+        ]
+        close = difflib.get_close_matches(name, candidates, n=3, cutoff=0.6)
+        return ", ".join(close)
+    except Exception:
+        return ""
+
+
+def _add_hint(
+    msg: str,
+    snippet: str | None = None,
+    source: str | None = None,
+) -> str | None:
+    """A prescriptive next step for a failure, per SPEC N3.
+
+    *source* is the user's whole submission. A chained CadQuery
+    expression can report a line that does not contain the failing call,
+    so matching on the snippet alone missed e.g. fillet errors.
+    """
     ml = msg.lower()
-    ctx = (ml + " " + (snippet or "").lower()).strip()
-    if "fillet" in ctx and any(
-        w in ctx
-        for w in ("radius", "exceed", "impossible", "failed", "command not done")
-    ):
-        return "Reduce fillet radius or select fewer edges."
-    if "chamfer" in ctx and any(
-        w in ctx for w in ("distance", "exceed", "failed", "command not done")
-    ):
-        return "Reduce chamfer distance — it exceeds the available edge length."
-    if "brep_api" in ml and "command not done" in ml:
+    ctx = " ".join(
+        part.lower()
+        for part in (ml, snippet or "", source or "")
+        if part
+    ).strip()
+
+    # Fillet/chamfer keep their dimension-specific wording.
+    if "fillet" in ctx and any(w in ctx for w in _FILLET_WORDS):
         return (
-            "An OCP kernel operation failed — check fillet/chamfer radii "
-            "and boolean operand sizes."
+            "Reduce the fillet radius or select fewer edges: the radius "
+            "must be smaller than half the shortest adjoining edge."
         )
+    if "chamfer" in ctx and any(w in ctx for w in _CHAMFER_WORDS):
+        return (
+            "Reduce the chamfer distance - it exceeds the available edge "
+            "length."
+        )
+
+    # Hallucinated API, with near-matches from the real Workplane.
+    if "object has no attribute" in ml:
+        bad = msg.split("attribute")[-1].strip().strip("'\"")
+        suggestions = _workplane_suggestions(bad)
+        base = (
+            f"'{bad}' is not a CadQuery method. Check the cadquery_primer "
+            f"prompt or the cad://examples resources for the real name."
+        )
+        return f"{base} Did you mean: {suggestions}?" if suggestions else base
+
+    for needle, hint in _HINTS:
+        if needle in ctx:
+            return hint
+
     if "selector" in ml or "does not exist" in ml:
         return (
-            "Check selector string — the face/edge may not exist "
-            "after prior operations."
+            "Check the selector string - the face or edge may not exist "
+            "after earlier operations. Use measure(what='faces') to see "
+            "how many faces the shape has."
+        )
+    if ml.startswith("takes") or "positional argument" in ml:
+        return (
+            "Wrong number of arguments. Check the method signature in the "
+            "cadquery_primer prompt."
         )
     return None
 
 
-def main() -> None:
-    tmpdir = sys.argv[1]
-    os.chdir(tmpdir)
+def _context_lines(source: str, line: int, radius: int = 2) -> list[str]:
+    """The failing line plus its neighbours.
 
-    # 1. Block sockets before any other import
-    _block_sockets()
+    The root cause is often the statement *before* the one that raised —
+    a chain that lost its solid, for instance.
+    """
+    lines = source.splitlines()
+    start = max(0, line - 1 - radius)
+    end = min(len(lines), line + radius)
+    out = []
+    for i in range(start, end):
+        marker = ">>" if i == line - 1 else "  "
+        out.append(f"{marker} {i + 1:3}| {lines[i]}")
+    return out
 
-    # 2. Import cadquery (needs to happen before import restriction)
+
+def serve() -> None:
+    """Pre-warm, then run exactly one job and exit.
+
+    The expensive part - importing CadQuery - happens before any job
+    arrives. A job is one JSON line on stdin giving the session tmpdir and
+    the paths to use. The process handles it and exits, so the interpreter
+    and namespace are never reused for a second job (CAD-014).
+    """
     import cadquery
 
-    # 3. Block dangerous os functions
-    _block_dangerous_os()
+    sys.stderr.write("cad-mcp worker ready\n")
+    sys.stderr.flush()
 
-    # 4. Install import restriction
-    _install_import_restriction()
+    line = sys.stdin.readline()
+    if not line.strip():
+        return
+    job = json.loads(line)
 
-    # 5. Read user code
-    code_path = os.path.join(tmpdir, "user_code.py")
-    with open(code_path) as f:
+    global _RESULT_PATH
+    _RESULT_PATH = job["result_out"]
+    os.environ["CAD_MCP_BREP_OUT"] = job["brep_out"]
+    _run_job(job["tmpdir"], job["code_path"], cadquery)
+
+
+def main() -> None:
+    if "--serve" in sys.argv[1:]:
+        serve()
+        return
+
+    tmpdir = sys.argv[1]
+    code_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
+        tmpdir, "user_code.py"
+    )
+
+    import cadquery
+
+    _run_job(tmpdir, code_path, cadquery)
+
+
+def _run_job(tmpdir: str, code_path: str, cadquery: Any) -> None:
+    os.chdir(tmpdir)
+
+    # Read the user's code before the path guard exists — the code file
+    # lives in the session dir, so this is also legal afterwards, but
+    # doing it first keeps the guard's allowed set minimal.
+    with open(code_path, encoding="utf-8") as f:
         user_code = f.read()
+
+    # Everything after this line runs confined (SPEC N1).
+    from cad_mcp._sandbox_policy import install_all
+
+    install_all(tmpdir)
 
     # 6. Redirect stdout to capture user prints during exec
     real_stdout = sys.stdout
@@ -181,18 +284,19 @@ def main() -> None:
             err["line"] = user_line
         if user_text:
             err["snippet"] = user_text
-        hint = _add_hint(str(exc), user_text)
+        if user_line is not None:
+            err["context"] = _context_lines(user_code, user_line)
+        hint = _add_hint(str(exc), user_text, user_code)
         if hint:
             err["hint"] = hint
-        print(json.dumps(err))
+        emit(err)
         return
 
     sys.stdout = real_stdout
 
     # 8. Check for result variable
     if "result" not in ns:
-        print(
-            json.dumps(
+        emit(
                 {
                     "ok": False,
                     "error_type": "NameError",
@@ -202,7 +306,7 @@ def main() -> None:
                     ),
                     "hint": "Add: result = cq.Workplane('XY').box(10, 10, 10)",
                 }
-            )
+            
         )
         return
 
@@ -214,8 +318,7 @@ def main() -> None:
     elif hasattr(result, "wrapped"):
         wp = cadquery.Workplane().newObject([result])
     else:
-        print(
-            json.dumps(
+        emit(
                 {
                     "ok": False,
                     "error_type": "TypeError",
@@ -225,7 +328,7 @@ def main() -> None:
                     ),
                     "hint": "result = cq.Workplane('XY').box(10, 10, 10)",
                 }
-            )
+            
         )
         return
 
@@ -251,29 +354,29 @@ def main() -> None:
         pass
 
     # 12. Serialize to BREP
-    brep_path = os.path.join(tmpdir, "current.brep")
+    brep_path = os.environ.get("CAD_MCP_BREP_OUT") or os.path.join(
+        tmpdir, "current.brep"
+    )
     try:
         wp.val().exportBrep(brep_path)
     except Exception as export_err:
-        print(
-            json.dumps(
+        emit(
                 {
                     "ok": False,
                     "error_type": "ExportError",
                     "message": f"Failed to serialize shape to BREP: {export_err}",
                 }
-            )
+            
         )
         return
 
-    print(
-        json.dumps(
+    emit(
             {
                 "ok": True,
                 "solid_count": solid_count,
                 "bbox": bbox,
             }
-        )
+        
     )
 
 

@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import base64
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ImageContent, TextContent
 
 from cad_mcp import render, session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import fail
 from cad_mcp.render import PartMesh, apply_transform, color_rgb
 
 
@@ -19,6 +20,7 @@ def register(mcp: MCPServer) -> None:
         width: int = 800,
         height: int = 600,
         parts: list[str] | None = None,
+        ctx: Context | None = None,
     ) -> list[TextContent | ImageContent]:
         """Render the current assembly as a multi-view PNG grid.
 
@@ -33,14 +35,18 @@ def register(mcp: MCPServer) -> None:
             height: Total image height in pixels (default 600).
             parts:  Part names to render. Default: all parts with geometry.
         """
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
 
         if parts is not None:
             bad = [n for n in parts if n not in sess.parts]
             if bad:
                 return [TextContent(
                     type="text",
-                    text=f"Unknown parts: {bad}. Available: {list(sess.parts)}",
+                    text=fail(
+                        "PartNotFound",
+                        f"Unknown parts: {bad}.",
+                        hint=f"Available: {list(sess.parts)}.",
+                    ),
                 )]
             render_parts = [sess.parts[n] for n in parts]
         else:
@@ -66,45 +72,57 @@ def register(mcp: MCPServer) -> None:
             return [
                 TextContent(
                     type="text",
-                    text=(
-                        "No model to render. Run execute_cad first to "
-                        "create a shape."
+                    text=fail(
+                        "NoModel",
+                        "No model to render.",
+                        hint="Run execute_cad to create geometry first.",
                     ),
                 )
             ]
 
         try:
-            if len(part_meshes) == 1:
-                png_bytes = render.render_assembly(
-                    part_meshes, views, width, height
-                )
-            else:
-                png_bytes = render.render_assembly(
-                    part_meshes, views, width, height
-                )
+            png_bytes = render.render_assembly(
+                part_meshes, views, width, height
+            )
         except Exception as exc:
             return [
                 TextContent(
                     type="text",
-                    text=f"Render failed: {type(exc).__name__}: {exc}",
+                    text=fail(
+                        type(exc).__name__,
+                        f"Render failed: {exc}",
+                        hint=(
+                            "Try fewer views, a smaller width/height, or a "
+                            "simpler model."
+                        ),
+                    ),
                 )
             ]
 
-        view_list = views or render.DEFAULT_VIEWS
+        try:
+            view_list = render.normalise_views(views)
+        except ValueError as exc:
+            return [TextContent(
+                type="text",
+                text=fail("ValueError", str(exc)),
+            )]
+        eff_w, eff_h, clamp_note = render.clamp_size(width, height)
         b64 = base64.b64encode(png_bytes).decode("ascii")
 
         rendered_names = [
             p.name for p in render_parts if sess.has_model(p.name)
         ]
+        detail = (
+            f"Rendered {len(view_list)} view(s): "
+            f"{', '.join(view_list)}  "
+            f"({eff_w}x{eff_h} px)  "
+            f"Parts: {', '.join(rendered_names)}  "
+            f"Backend: {render.active_backend()}"
+        )
+        if clamp_note:
+            detail += f"  ({clamp_note})"
+
         return [
             ImageContent(type="image", data=b64, mime_type="image/png"),
-            TextContent(
-                type="text",
-                text=(
-                    f"Rendered {len(view_list)} view(s): "
-                    f"{', '.join(view_list)}  "
-                    f"({width}x{height} px)  "
-                    f"Parts: {', '.join(rendered_names)}"
-                ),
-            ),
+            TextContent(type="text", text=detail),
         ]

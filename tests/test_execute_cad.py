@@ -9,12 +9,16 @@ Covers:
 """
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from cad_mcp import session
 from cad_mcp.server import mcp
+
+from .envelope_helpers import flat, summary
+
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,7 +53,7 @@ def _clean_sessions() -> None:  # type: ignore[misc]
 
 
 def _text(result: object) -> str:
-    return result.content[0].text  # type: ignore[union-attr]
+    return summary(result)
 
 
 # ---------------------------------------------------------------------------
@@ -66,8 +70,10 @@ async def test_box_executes() -> None:
 
 @pytest.mark.anyio
 async def test_bracket_executes() -> None:
-    text = _text(await mcp.call_tool("execute_cad", {"code": BRACKET_CODE}))
-    assert "OK" in text
+    result = await mcp.call_tool("execute_cad", {"code": BRACKET_CODE})
+    payload = flat(result)
+    assert payload["ok"], f"bracket failed: {payload}"
+    assert payload["summary"].startswith("OK")
 
 
 @pytest.mark.anyio
@@ -138,8 +144,7 @@ async def test_invalid_mode() -> None:
 @pytest.mark.anyio
 async def test_list_session() -> None:
     await mcp.call_tool("execute_cad", {"code": BOX_CODE})
-    text = _text(await mcp.call_tool("list_session", {}))
-    data = json.loads(text)
+    data = flat(await mcp.call_tool("list_session", {}))
     assert data["code_blocks"] == 1
     assert data["has_model"] is True
     assert data["current_bbox"] is not None
@@ -149,8 +154,7 @@ async def test_list_session() -> None:
 async def test_reset_session() -> None:
     await mcp.call_tool("execute_cad", {"code": BOX_CODE})
     await mcp.call_tool("reset_session", {})
-    text = _text(await mcp.call_tool("list_session", {}))
-    data = json.loads(text)
+    data = flat(await mcp.call_tool("list_session", {}))
     assert data["code_blocks"] == 0
     assert data["has_model"] is False
 
@@ -179,82 +183,12 @@ async def test_fillet_error_has_hint() -> None:
 # SPEC 9.3 — Malicious-code suite
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.anyio
-async def test_network_blocked() -> None:
-    code = """\
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.connect(("8.8.8.8", 53))
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
-    assert any(
-        w in text.lower()
-        for w in ("network", "disabled", "blocked", "oserror", "not allowed")
-    )
-
-
-@pytest.mark.anyio
-async def test_import_subprocess_blocked() -> None:
-    code = """\
-import subprocess
-subprocess.run(["echo", "pwned"])
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
-    assert "not allowed" in text.lower() or "ImportError" in text
-
-
-@pytest.mark.anyio
-async def test_import_shutil_blocked() -> None:
-    code = """\
-import shutil
-shutil.rmtree("/")
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
-    assert "not allowed" in text.lower()
-
-
-@pytest.mark.anyio
-async def test_os_system_blocked() -> None:
-    code = """\
-import os
-os.system("echo pwned")
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
-    assert any(
-        w in text.lower()
-        for w in ("blocked", "permission", "denied")
-    )
-
-
-@pytest.mark.anyio
-async def test_infinite_loop_killed() -> None:
-    code = """\
-while True:
-    pass
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(
-        await mcp.call_tool("execute_cad", {"code": code})
-    )
-    assert "TimeoutError" in text
-
-
-@pytest.mark.anyio
-async def test_fork_bomb_blocked() -> None:
-    code = """\
-import os
-while True:
-    os.fork()
-result = cq.Workplane("XY").box(1,1,1)
-"""
-    text = _text(await mcp.call_tool("execute_cad", {"code": code}))
-    assert "OK" not in text
+# ---------------------------------------------------------------------------
+# Containment
+#
+# The SPEC 9.3 vectors live in tests/test_sandbox_containment.py, which
+# asserts observable effects (no file written, no connection accepted, no
+# surviving process) instead of the error wording. The weak versions that
+# used to live here asserted `"OK" not in text` and passed while the
+# sandbox was wide open.
+# ---------------------------------------------------------------------------

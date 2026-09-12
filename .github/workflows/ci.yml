@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**.md']
+  pull_request:
+    paths-ignore: ['docs/**', '**.md']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep exports out of the checkout so a stray artefact cannot be committed.
+  CAD_MCP_OUTPUT_DIR: ${{ github.workspace }}/.cad-output
+
+jobs:
+  # Fast feedback: lint and types before spending minutes on geometry.
+  static:
+    name: lint + types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - name: ruff
+        run: uv run ruff check .
+      - name: mypy --strict
+        run: uv run mypy
+
+  test:
+    name: tests (${{ matrix.os }})
+    needs: static
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # SPEC N5 names Linux and macOS as supported; Windows is the
+        # primary development platform, so all three are exercised.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - name: pytest (fast subset first, for quick signal)
+        run: uv run pytest -q -m "not geometry and not slow"
+      - name: pytest (full)
+        run: uv run pytest -q
+      - name: smoke (full loop)
+        run: uv run python scripts/smoke.py
+
+  # PLAN Phase 2 gate: the matplotlib fallback must work where EGL is absent.
+  render-fallback:
+    name: render fallback (no EGL)
+    needs: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - name: assert EGL really is unavailable
+        run: |
+          uv run python - <<'PY'
+          from cad_mcp import render
+          assert render._check_pyrender() is False, (
+              "pyrender initialised — this job is meant to exercise the "
+              "matplotlib fallback with EGL absent"
+          )
+          print("confirmed: EGL unavailable, fallback path under test")
+          PY
+      - run: uv run pytest tests/test_render.py -q
+
+  # The pyrender path shipped untested and uninstalled (CAD-011).
+  render-pyrender:
+    name: render (pyrender / osmesa)
+    needs: static
+    runs-on: ubuntu-latest
+    continue-on-error: true  # informational until the GPU path is required
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: install OSMesa
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libosmesa6-dev libgl1 libglu1-mesa freeglut3-dev
+      - run: uv sync --all-extras --extra gpu
+      - name: render via pyrender
+        env:
+          PYOPENGL_PLATFORM: osmesa
+        run: uv run pytest tests/test_render.py -q
+
+  # CAD-012: the declared dependencies must actually be sufficient.
+  clean-install:
+    name: clean install (no dev deps)
+    needs: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: sync runtime deps only
+        run: uv sync --no-dev
+      - name: the full loop must work with declared deps alone
+        run: uv run python scripts/smoke.py

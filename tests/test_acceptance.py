@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -15,6 +14,12 @@ import pytest
 from cad_mcp import session
 from cad_mcp.resources import EXAMPLES
 from cad_mcp.server import mcp
+
+from .envelope_helpers import flat, part_report, summary
+
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
 
 BRACKET_CODE = EXAMPLES["bracket"]
 
@@ -34,7 +39,7 @@ async def test_spec_9_1_bracket_to_watertight_stl() -> None:
     """From the bracket example, produce a validated watertight STL."""
     # Iteration 1: execute
     result = await mcp.call_tool("execute_cad", {"code": BRACKET_CODE})
-    text = result.content[0].text  # type: ignore[union-attr]
+    text = summary(result)
     assert text.startswith("OK"), f"execute_cad failed: {text}"
 
     # Render (mandatory per workflow)
@@ -44,7 +49,7 @@ async def test_spec_9_1_bracket_to_watertight_stl() -> None:
 
     # Validate
     result = await mcp.call_tool("validate_mesh", {})
-    report = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    report = part_report(result)
     assert report["watertight"], f"Not watertight: {report}"
     assert report["manifold"], f"Not manifold: {report}"
 
@@ -52,7 +57,7 @@ async def test_spec_9_1_bracket_to_watertight_stl() -> None:
     result = await mcp.call_tool(
         "export_model", {"format": "stl", "filename": "bracket"}
     )
-    exp = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    exp = flat(result)
     assert exp["ok"], f"STL export failed: {exp}"
     assert Path(exp["path"]).exists()
     assert exp["size_bytes"] > 1000
@@ -69,7 +74,7 @@ async def test_spec_9_2_measure_dimensions() -> None:
     await mcp.call_tool("execute_cad", {"code": BRACKET_CODE})
 
     result = await mcp.call_tool("measure", {"what": "bbox"})
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
     assert data["ok"]
 
     dims = data["dimensions"]
@@ -87,61 +92,19 @@ async def test_spec_9_2_measure_dimensions() -> None:
 
     # Verify volume is a positive number
     result = await mcp.call_tool("measure", {"what": "volume"})
-    vol = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    vol = flat(result)
     assert vol["ok"]
     assert vol["volume_mm3"] > 100
 
 
 # ------------------------------------------------------------------
 # 9.3: Malicious code — all contained
-#       (These duplicate test_execute_cad.py but are here to show
-#        explicit acceptance-criteria coverage.)
+#
+# Implemented in tests/test_sandbox_containment.py. Kept out of this file
+# deliberately: the versions that lived here asserted the absence of the
+# substring "OK", which every error satisfies, so they certified SPEC 9.3
+# while filesystem and raw-socket escapes both succeeded.
 # ------------------------------------------------------------------
-
-
-@pytest.mark.anyio
-async def test_spec_9_3_network_blocked() -> None:
-    code = (
-        "import socket; socket.socket().connect(('8.8.8.8', 53))\n"
-        "import cadquery as cq\n"
-        "result = cq.Workplane('XY').box(1,1,1)"
-    )
-    result = await mcp.call_tool("execute_cad", {"code": code})
-    text = result.content[0].text  # type: ignore[union-attr]
-    assert "blocked" in text.lower() or "error" in text.lower()
-    assert not text.startswith("OK")
-
-
-@pytest.mark.anyio
-async def test_spec_9_3_infinite_loop_killed() -> None:
-    code = "while True: pass"
-    result = await mcp.call_tool("execute_cad", {"code": code})
-    text = result.content[0].text  # type: ignore[union-attr]
-    assert "timeout" in text.lower() or "time limit" in text.lower()
-
-
-@pytest.mark.anyio
-async def test_spec_9_3_fork_bomb_blocked() -> None:
-    code = (
-        "import os\nos.fork()\n"
-        "import cadquery as cq\n"
-        "result = cq.Workplane('XY').box(1,1,1)"
-    )
-    result = await mcp.call_tool("execute_cad", {"code": code})
-    text = result.content[0].text  # type: ignore[union-attr]
-    assert not text.startswith("OK")
-
-
-@pytest.mark.anyio
-async def test_spec_9_3_file_escape_blocked() -> None:
-    code = (
-        "import shutil\n"
-        "import cadquery as cq\n"
-        "result = cq.Workplane('XY').box(1,1,1)"
-    )
-    result = await mcp.call_tool("execute_cad", {"code": code})
-    text = result.content[0].text  # type: ignore[union-attr]
-    assert not text.startswith("OK")
 
 
 # ------------------------------------------------------------------
@@ -154,5 +117,5 @@ async def test_spec_9_3_file_escape_blocked() -> None:
 @pytest.mark.anyio
 async def test_spec_9_4_server_starts_and_pings() -> None:
     result = await mcp.call_tool("ping", {})
-    text = result.content[0].text  # type: ignore[union-attr]
+    text = summary(result)
     assert "pong" in text.lower()

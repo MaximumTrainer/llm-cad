@@ -1,15 +1,15 @@
 """gen_ai_mesh tool — generate 3D mesh via Meshy API (SPEC 10.2)."""
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
 import httpx
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import meshy, session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import fail, ok
 from cad_mcp.mesh_to_brep import glb_to_brep
 from cad_mcp.meshy import MeshyError, MeshyTimeout
 
@@ -25,6 +25,7 @@ def register(mcp: MCPServer) -> None:
         target_polycount: int = 4000,
         refine: bool = False,
         ai_model: str = "latest",
+        ctx: Context | None = None,
     ) -> str:
         """Generate a 3D mesh from a text description using the Meshy API.
 
@@ -51,15 +52,39 @@ def register(mcp: MCPServer) -> None:
             JSON report with task_id, mesh stats, and thumbnail URL on
             success; structured error on failure.
         """
+        # The docstring has always said 100-15000; the code never
+        # enforced it (CAD-028).
+        if not 100 <= target_polycount <= 15000:
+            return fail(
+                "ValueError",
+                f"target_polycount {target_polycount} is out of range.",
+                hint="Use a value between 100 and 15000.",
+            )
+        if art_style not in ("realistic", "sculpture"):
+            return fail(
+                "ValueError",
+                f"Unknown art_style {art_style!r}.",
+                hint='Use "realistic" or "sculpture".',
+            )
+        if topology not in ("triangle", "quad"):
+            return fail(
+                "ValueError",
+                f"Unknown topology {topology!r}.",
+                hint='Use "triangle" or "quad".',
+            )
+
         api_key = os.environ.get("MESHY_API_KEY", "")
         if not api_key:
-            return json.dumps({
-                "ok": False,
-                "error": "missing_api_key",
-                "hint": "Set MESHY_API_KEY env var (get one at https://meshy.ai)",
-            })
+            return fail(
+                "MissingAPIKey",
+                "MESHY_API_KEY is not set.",
+                hint=(
+                    "Set the MESHY_API_KEY environment variable "
+                    "(get a key at https://meshy.ai)."
+                ),
+            )
 
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
         part = sess.get_active_part()
 
         try:
@@ -103,20 +128,19 @@ def register(mcp: MCPServer) -> None:
                     task_id = refine_id
 
         except MeshyTimeout as exc:
-            return json.dumps({
-                "ok": False,
-                "error": "generation_timeout",
-                "task_id": exc.task_id,
-                "hint": "Generation timed out. Retry or simplify the prompt.",
-            })
+            return fail(
+                "GenerationTimeout",
+                f"Meshy task {exc.task_id} did not finish in time.",
+                hint="Retry, or simplify the prompt.",
+                task_id=exc.task_id,
+            )
         except MeshyError as exc:
-            return json.dumps({
-                "ok": False,
-                "error": "meshy_api_error",
-                "status": exc.status,
-                "message": str(exc),
-                "hint": exc.hint,
-            })
+            return fail(
+                "MeshyAPIError",
+                f"HTTP {exc.status}: {exc}",
+                hint=exc.hint,
+                status=exc.status,
+            )
 
         brep_path = sess.brep_path()
         try:
@@ -124,10 +148,17 @@ def register(mcp: MCPServer) -> None:
         except Exception as exc:
             return _err(f"Mesh import failed: {exc}", task_id)
 
-        part.code_history.append(
-            f'# gen_ai_mesh: "{prompt}" (task_id: {task_id})'
-        )
-        part.bbox = None
+        # Provenance, not a synthetic code-history entry. SPEC §8 makes
+        # code history the source of truth and the BREP a cache; this
+        # geometry cannot be reproduced from code, so recording a comment
+        # in the history meant a later execute_cad(mode="append") replayed
+        # a comment plus new code and silently destroyed the mesh
+        # (CAD-022). execute_cad now refuses on an ai_mesh part instead.
+        part.source = "ai_mesh"
+        part.ai_prompt = prompt
+        part.ai_glb_path = str(glb_path)
+        part.code_history = []
+        part.bbox = stats.get("bbox")
 
         report: dict[str, Any] = {
             "ok": True,
@@ -138,18 +169,35 @@ def register(mcp: MCPServer) -> None:
             "face_count": stats["face_count"],
             "format": "glb",
             "glb_path": str(glb_path),
+        "bbox": stats.get("bbox"),
+        "source": "ai_mesh",
+        "reproducible_from_code": False,
+        "simplified": stats.get("simplified", False),
+        "original_face_count": stats.get("original_face_count"),
             "note": (
-                "Shape imported as tessellated B-rep. "
-                "Do NOT use fillet/shell/chamfer on this shape."
+                "Imported as a tessellated B-rep (triangles, not NURBS). "
+                "fillet/shell/chamfer WILL fail on it. The geometry is "
+                "not reproducible from code, so execute_cad will refuse "
+                "to run against this part rather than destroy it — use "
+                "create_part to model parametric geometry alongside it. "
+                "The GLB is kept at glb_path so the mesh can be "
+                "re-imported."
             ),
         }
-        return json.dumps(report)
+        headline = (
+            f"Generated mesh for {prompt!r}: {stats['face_count']} faces, "
+            f"{stats['vertex_count']} vertices (task {task_id})."
+        )
+        if stats.get("simplified"):
+            headline += (
+                f" Simplified from {stats['original_face_count']} "
+                f"triangles to stay within the import budget."
+            )
+        headline += (
+            " Tessellated B-rep — do NOT use fillet/shell/chamfer."
+        )
+        return ok(headline, **report)
 
 
 def _err(message: str, task_id: str) -> str:
-    return json.dumps({
-        "ok": False,
-        "error": "import_error",
-        "message": message,
-        "task_id": task_id,
-    })
+    return fail("ImportError", message, task_id=task_id)

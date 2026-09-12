@@ -96,7 +96,13 @@ class TestRunKwargs:
         assert kwargs["host"] == "127.0.0.1"
         assert kwargs["port"] == 9000
         assert kwargs["stateless_http"] is False
-        assert "transport_security" not in kwargs
+        # Host validation is now applied unconditionally (CAD-006). It used
+        # to be omitted for loopback and derived from the bind address
+        # otherwise, which produced an allowlist containing "0.0.0.0" —
+        # never a real Host header, so it protected nothing.
+        assert "transport_security" in kwargs
+        allowed = kwargs["transport_security"].allowed_hosts
+        assert "127.0.0.1" in allowed
 
     def test_http_custom_host_adds_security(self) -> None:
         config = TransportConfig(

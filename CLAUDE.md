@@ -21,20 +21,35 @@ The visual feedback loop is the product. Any change that makes renders slower th
 - One tool per file under `src/cad_mcp/tools/`, registered in `server.py`
 - All user code execution goes through `sandbox.py` (subprocess, 30s timeout, no network, temp cwd). Never `exec()` in the server process.
 - Session state (parts with code history + BREP) lives in `session.py`, keyed by MCP session. Multi-part assembly support per SPEC 10.3.
+- Tools resolve their session with `session.for_context(ctx)` and take `ctx: Context | None = None` as the last parameter. **Never** call `session.get_or_create()` with no argument — that shared one global session across every HTTP client.
+- Mutating tools take `with sess.lock:` — tools are dispatched on a thread pool.
+- Every file write goes through `cad_mcp.paths.safe_output_path` / `unique_output_path`.
 - Tool results: return errors as structured text the LLM can act on (exception type, line number, offending snippet) — never bare tracebacks, never silent failures.
 - Images return as MCP `ImageContent` (base64 PNG), 800×600 max, 4-view grid by default.
 - Type hints everywhere; `ruff` + `mypy --strict` must pass before any commit.
+
+## Skills (use these, don't work from memory)
+`.claude/skills/` — hooks enforce mechanically, skills guide judgement:
+- `add-tool` — adding/renaming a tool: SPEC check → file → registration → envelope → README row → prompt coverage → tests
+- `spec-guard` — before changing tool surface, session state, transport, sandbox guarantees, determinism or latency
+- `sandbox-audit` — any change to `sandbox.py` / `_sandbox_worker.py` / `_sandbox_policy.py`
+- `render-check` — any change to `render.py` or `render_views`
+- `pin-bump` — changing a cadquery/OCP/trimesh/manifold3d/mcp pin
+- `release-check` — before tagging
 
 ## Commands
 - `uv run pytest` — full test suite
 - `uv run cad-mcp` — start server on stdio
 - `uv run cad-mcp --transport http` — start server on streamable HTTP (port 8000)
 - `uv run python scripts/smoke.py` — end-to-end: builds a bracket, renders, validates, exports
+- `uv run pytest -m llm -v` — live LLM tests via OpenRouter (needs `OPENROUTER_API_KEY`)
+- `./scripts/install-hooks.sh` (or `scripts/install-hooks.ps1`) — install git hooks
 
 ## What NOT to do
 - Don't add tools beyond SPEC.md without updating SPEC.md first
 - Don't return meshes/geometry blobs to the LLM — it can't read them; return images and measurements
-- Don't let render or export write outside the session's temp directory
+- Don't let render or export write outside the session's temp or output directory — use `cad_mcp.paths`
+- Don't assert security behaviour by error wording; assert the observable effect (no file, no connection, no process)
 - Don't upgrade cadquery/OCP pins casually — rendering and export are version-sensitive; run golden tests after any bump
 - Don't attempt parametric ops (fillet, shell) on AI-generated meshes — they're tessellated B-rep, not NURBS
 - Don't make live Meshy API calls in unit tests — mock httpx; gate integration tests on `MESHY_API_KEY`

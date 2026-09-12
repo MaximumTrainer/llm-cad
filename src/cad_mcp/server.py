@@ -63,6 +63,12 @@ mcp = create_server()
 def main() -> None:
     cad_logging.setup()
 
+    # Start a spare sandbox worker so the first execute_cad does not pay
+    # the ~3.3s CadQuery import on the critical path (CAD-014).
+    from cad_mcp import sandbox
+
+    sandbox.prewarm()
+
     from cad_mcp.transport import parse_args
 
     config = parse_args(sys.argv[1:])

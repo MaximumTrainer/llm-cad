@@ -1,13 +1,13 @@
 """create_part tool — add a new named part to the assembly (SPEC 10.3)."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import fail, ok
 from cad_mcp.session import DEFAULT_COLORS, MAX_PARTS, PART_NAME_RE, Part
 
 
@@ -17,6 +17,7 @@ def register(mcp: MCPServer) -> None:
     def create_part(
         name: str,
         color: str = "",
+        ctx: Context | None = None,
     ) -> str:
         """Create a new named part and set it as the active part.
 
@@ -33,42 +34,67 @@ def register(mcp: MCPServer) -> None:
             JSON with the created part and updated part list.
         """
         if not PART_NAME_RE.match(name):
-            return _err(
-                f"Invalid part name '{name}'. Must match "
-                f"[a-z][a-z0-9_]{{0,31}}."
+            return fail(
+                "ValueError",
+                f"Invalid part name '{name}'.",
+                hint=(
+                    "Names must match [a-z][a-z0-9_]{0,31}: lowercase, "
+                    "start with a letter, max 32 chars. Try 'lid'."
+                ),
             )
 
-        sess = session.get_or_create()
+        sess = session.for_context(ctx)
 
         if name in sess.parts:
-            return _err(f"Part '{name}' already exists.")
+            return fail(
+                "DuplicatePart",
+                f"Part '{name}' already exists.",
+                hint="Use set_active_part to target it, or pick a new name.",
+            )
 
         if len(sess.parts) >= MAX_PARTS:
-            return _err(
-                f"Maximum {MAX_PARTS} parts per assembly. "
-                f"Delete a part first."
+            return fail(
+                "TooManyParts",
+                f"Maximum {MAX_PARTS} parts per assembly.",
+                hint="Delete a part with delete_part first.",
             )
 
         if not color:
             color = sess.next_color()
         elif color not in DEFAULT_COLORS:
-            return _err(
-                f"Unknown color '{color}'. "
-                f"Choose from: {DEFAULT_COLORS}"
+            return fail(
+                "ValueError",
+                f"Unknown color '{color}'.",
+                hint=f"Choose from: {DEFAULT_COLORS}.",
             )
 
-        part = Part(name=name, color=color)
-        sess.parts[name] = part
-        sess.active_part = name
+        # Check-then-insert must be atomic: two concurrent create_part
+        # calls could otherwise both pass the uniqueness check (CAD-008).
+        with sess.lock:
+            if name in sess.parts:
+                return fail(
+                "DuplicatePart",
+                f"Part '{name}' already exists.",
+                hint="Use set_active_part to target it, or pick a new name.",
+            )
+            if len(sess.parts) >= MAX_PARTS:
+                return fail(
+                    "TooManyParts",
+                    f"Maximum {MAX_PARTS} parts per assembly.",
+                    hint="Delete a part with delete_part first.",
+                )
+            sess.parts[name] = Part(name=name, color=color)
+            sess.active_part = name
 
         parts_list = _parts_summary(sess)
-        return json.dumps({
-            "ok": True,
-            "created": name,
-            "color": color,
-            "active_part": name,
-            "parts": parts_list,
-        })
+        return ok(
+            f"Created part '{name}' ({color}) and made it active. "
+            f"Assembly now has {len(parts_list)} part(s).",
+            created=name,
+            color=color,
+            active_part=name,
+            parts=parts_list,
+        )
 
 
 def _parts_summary(sess: session.Session) -> list[dict[str, Any]]:
@@ -81,8 +107,3 @@ def _parts_summary(sess: session.Session) -> list[dict[str, Any]]:
             "is_active": n == sess.active_part,
         })
     return result
-
-
-def _err(message: str) -> str:
-    d: dict[str, Any] = {"ok": False, "error": message}
-    return json.dumps(d)

@@ -99,6 +99,7 @@ CAD_MCP_TRANSPORT=http uv run cad-mcp
 
 | Tool | Description |
 |------|-------------|
+| `ping` | Connectivity check. Returns `pong`. |
 | `execute_cad` | Run CadQuery Python code in a sandbox. Assign result to `result`. |
 | `render_views` | Render multi-angle PNG preview (front/right/top/iso) |
 | `validate_mesh` | Check watertight, manifold, wall thickness, overhangs, PLA mass |
@@ -131,11 +132,96 @@ CAD_MCP_TRANSPORT=http uv run cad-mcp
 ## Development
 
 ```bash
-uv run pytest             # tests
+uv run pytest             # tests (live LLM tests excluded by default)
 uv run ruff check .       # lint
 uv run mypy --strict src/cad_mcp  # type check
 uv run python scripts/smoke.py   # end-to-end smoke test
 ```
+
+### Live LLM integration tests
+
+`tests/test_llm_integration.py` drives the server with a real model over
+[OpenRouter](https://openrouter.ai), which is the only way to verify the
+things that matter solely to an LLM: that the published tool schemas are
+accepted by a function-calling provider, that `render_views` images are
+actually *readable* (including the mm scale ticks), that the structured
+errors of SPEC N3 are actionable enough to recover from, and SPEC 9.1
+itself — which is written about an LLM iterating, not about replaying a
+known-good example.
+
+These cost money and need network, so they are excluded from the default
+run and gated on an API key:
+
+```bash
+cp .env.example .env        # then add your key
+export OPENROUTER_API_KEY=sk-or-...
+
+uv run pytest -m llm -v     # schema, render-readability, error-recovery
+```
+
+The full SPEC 9.1 design loop is gated a second time, because it is the
+expensive one (roughly 100k+ tokens against a frontier model):
+
+```bash
+CAD_MCP_LLM_ACCEPTANCE=1 uv run pytest -m llm -v
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | — | Required. Tests skip without it. |
+| `OPENROUTER_MODEL` | `anthropic/claude-sonnet-5` | Must support tool calling **and** image input. |
+| `OPENROUTER_MAX_TOKENS` | `2048` | OpenRouter bills against the requested cap, so a small balance needs a small value. |
+| `CAD_MCP_LLM_ACCEPTANCE` | unset | Set to `1` to run the paid SPEC 9.1 loop. |
+
+Run the bracket loop by hand and print a tool-call transcript:
+
+```bash
+uv run python tests/llm_harness.py
+```
+
+Pointing `OPENROUTER_MODEL` at a weak model will fail the acceptance test
+for model-capability reasons rather than server reasons — the transcript
+in the failure output distinguishes the two.
+
+## Security model
+
+Model code is executed, so it is worth being precise about what the
+sandbox does and does not promise.
+
+**Hard guarantees (enforced by the OS):** wall-clock timeout, memory cap,
+file-size cap, process-count cap, and a process-tree kill on timeout.
+These hold regardless of what the executed code does.
+
+**Defence in depth (enforced in-process):** filesystem writes are
+confined to the session temp directory and reads to that directory plus
+the Python installation; networking is unavailable (including the
+`_socket` accelerator); process creation is blocked; and the import
+policy is enforced on both `__import__` and `sys.meta_path`, so
+`importlib` cannot route around it. Exports are additionally validated:
+`filename` must be a single safe component, and the resolved path is
+re-checked against the output directory.
+
+**What this is not.** The in-process layer shares an interpreter with the
+code it constrains, so it stops accidents and casual misuse — not a
+determined attacker. **Do not point this server at untrusted prompts
+without OS-level isolation** (a container, seccomp/bwrap, or a Windows
+restricted token) around the whole process.
+
+Tunables: `CAD_MCP_SANDBOX_TIMEOUT_S` (30), `CAD_MCP_SANDBOX_MEM_MB`
+(2048), `CAD_MCP_SANDBOX_FILE_MB` (512), `CAD_MCP_SANDBOX_MAX_PROCS` (64).
+
+Over HTTP: set `CAD_MCP_AUTH_TOKEN` for bearer auth (compared in constant
+time) and `CAD_MCP_ALLOWED_HOSTS` for DNS-rebinding protection. A
+non-loopback bind without both logs a warning at startup; bearer auth
+over plain HTTP is for localhost or a trusted network only — put a TLS
+terminator in front of anything else.
+
+## Where exports go
+
+`export_model` writes to `CAD_MCP_OUTPUT_DIR` (default
+`./cad-mcp-output/<session-id>/`). This is deliberately **not** the
+session temp directory: `reset_session` clears modelling state but keeps
+exported files, and tells you where they are.
 
 ## Troubleshooting
 

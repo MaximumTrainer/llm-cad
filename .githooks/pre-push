@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Full verification before anything leaves the machine.
+set -uo pipefail
+if command -v uv >/dev/null 2>&1; then RUN="uv run"; else RUN="python -m"; fi
+
+echo "pre-push: full test suite (live LLM tests excluded)..."
+if ! $RUN pytest -q; then
+  echo "✗ test suite failed" >&2; exit 1
+fi
+echo "pre-push: end-to-end smoke..."
+if ! $RUN python scripts/smoke.py >/dev/null; then
+  echo "✗ smoke script failed" >&2; exit 1
+fi
+echo "✓ pre-push passed"

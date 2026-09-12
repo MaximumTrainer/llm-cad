@@ -29,3 +29,12 @@ venv/
 .DS_Store
 Thumbs.db
 
+
+# Local secrets
+.env
+
+# Exported models (CAD_MCP_OUTPUT_DIR)
+cad-mcp-output/
+
+# Golden render inspection output
+golden-render.png

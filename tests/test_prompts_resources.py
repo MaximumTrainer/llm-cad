@@ -17,6 +17,12 @@ from cad_mcp import session
 from cad_mcp.resources import EXAMPLES
 from cad_mcp.server import mcp
 
+from .envelope_helpers import summary
+
+# Builds real geometry, so each test pays a sandbox subprocess.
+# Deselect with -m "not geometry" for fast feedback (CAD-025).
+pytestmark = pytest.mark.geometry
+
 
 @pytest.fixture(autouse=True)
 def _clean_sessions() -> None:  # type: ignore[misc]
@@ -127,10 +133,19 @@ async def test_session_code_after_execute() -> None:
 
 @pytest.mark.anyio
 async def test_example_resource_unknown() -> None:
+    """An unknown name is a structured error, not a Python comment.
+
+    It used to return `# Unknown example 'x'`, which the LLM cannot tell
+    apart from a working example (CAD-021).
+    """
+    from cad_mcp.envelope import validate
+
     data = await mcp.read_resource("cad://examples/nonexistent")
-    text = data[0].content  # type: ignore[union-attr]
-    assert "Unknown example" in text
-    assert "bracket" in text
+    payload = validate(str(data[0].content))  # type: ignore[union-attr]
+
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "UnknownExample"
+    assert "bracket" in payload["error"]["hint"]
 
 
 @pytest.mark.anyio
@@ -154,7 +169,7 @@ async def test_example_executes(name: str) -> None:
     """Every curated example must execute successfully."""
     code = EXAMPLES[name]
     result = await mcp.call_tool("execute_cad", {"code": code})
-    text = result.content[0].text  # type: ignore[union-attr]
+    text = summary(result)
 
     is_ok = text.startswith("OK")
     if not is_ok:

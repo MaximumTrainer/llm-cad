@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -37,15 +38,50 @@ class TransportConfig:
             "port": self.port,
             "stateless_http": self.stateless,
         }
-        hosts = list(self.allowed_hosts)
-        if self.host not in ("127.0.0.1", "localhost"):
-            hosts.append(self.host)
-            hosts.append(f"{self.host}:*")
-        if hosts:
-            kwargs["transport_security"] = TransportSecuritySettings(
-                allowed_hosts=hosts,
-            )
+        kwargs["transport_security"] = self.transport_security()
         return kwargs
+
+    def is_loopback(self) -> bool:
+        return self.host in ("127.0.0.1", "::1", "localhost")
+
+    def transport_security(self) -> TransportSecuritySettings:
+        """Host allowlist for DNS-rebinding protection (SPEC 10.1 H6).
+
+        Never derived from the bind address: `0.0.0.0` and `::` are
+        wildcards, never a real `Host` header, so adding them produced an
+        allowlist that matched nothing and protected nothing — in exactly
+        the deployment where protection matters.
+        """
+        hosts = list(self.allowed_hosts)
+        if not hosts:
+            if self.is_loopback():
+                hosts = [
+                    "127.0.0.1", "localhost", "::1",
+                    f"127.0.0.1:{self.port}",
+                    f"localhost:{self.port}",
+                ]
+            else:
+                # Deny by default rather than pretend to be protected.
+                hosts = []
+        return TransportSecuritySettings(allowed_hosts=hosts)
+
+    def warnings(self) -> list[str]:
+        """Deployment risks worth telling the operator about."""
+        out: list[str] = []
+        if not self.is_loopback() and not self.allowed_hosts:
+            out.append(
+                f"Binding non-loopback host {self.host!r} with no "
+                f"CAD_MCP_ALLOWED_HOSTS: every request will be rejected by "
+                f"DNS-rebinding protection. Set CAD_MCP_ALLOWED_HOSTS to the "
+                f"hostnames clients will use."
+            )
+        if not self.is_loopback() and not self.auth_token:
+            out.append(
+                f"Binding non-loopback host {self.host!r} with no "
+                f"CAD_MCP_AUTH_TOKEN: the server is unauthenticated. Set a "
+                f"token, and terminate TLS in front of it."
+            )
+        return out
 
     def auth_settings(self) -> tuple[BearerTokenVerifier, AuthSettings] | None:
         """Build SDK auth objects if ``auth_token`` is set."""
@@ -68,7 +104,11 @@ class BearerTokenVerifier:
         self._expected = expected_token
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if token != self._expected:
+        # Constant-time: `!=` on str short-circuits and leaks the token's
+        # length and common prefix across repeated requests.
+        if not secrets.compare_digest(
+            token.encode("utf-8"), self._expected.encode("utf-8")
+        ):
             return None
         return AccessToken(
             token=token,

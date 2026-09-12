@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# cad-mcp pre-commit: fast, staged-files-only checks.
+# Install with scripts/install-hooks.sh (or .ps1). Bypass with --no-verify
+# only on a WIP branch that will never reach main.
+set -uo pipefail
+
+RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[0;33m'; OFF=$'\033[0m'
+fail=0
+note() { printf '%s\n' "$1"; }
+die()  { printf '%s✗ %s%s\n' "$RED" "$1" "$OFF"; fail=1; }
+ok()   { printf '%s✓ %s%s\n' "$GRN" "$1" "$OFF"; }
+
+if command -v uv >/dev/null 2>&1; then RUN="uv run"; else RUN="python -m"; fi
+
+staged_py=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' | tr '\n' ' ')
+staged_all=$(git diff --cached --name-only --diff-filter=ACM | tr '\n' ' ')
+
+if [ -z "${staged_py// }" ]; then
+  note "${YLW}no staged Python — skipping lint/type/test${OFF}"
+else
+  # 1. Lint and format
+  if $RUN ruff check --force-exclude $staged_py; then ok "ruff"; else die "ruff check failed"; fi
+  if $RUN ruff format --check --force-exclude $staged_py >/dev/null 2>&1; then
+    ok "ruff format"
+  else
+    printf '%s! ruff format would change files (not blocking)%s\n' "$YLW" "$OFF"
+  fi
+
+  # 2. Types — the package as a whole; mypy needs the full import graph.
+  if $RUN mypy >/dev/null 2>&1; then ok "mypy --strict"; else die "mypy --strict failed (run: uv run mypy)"; fi
+
+  # 3. stdout corruption: a stray print in server code breaks stdio MCP
+  #    framing. This is PLAN's named risk and only a hook catches it cheaply.
+  offenders=""
+  for f in $staged_py; do
+    case "$f" in
+      src/cad_mcp/_sandbox_worker.py) continue ;;
+      src/cad_mcp/*)
+        if git show ":$f" | grep -nE '^\s*print\(' >/dev/null 2>&1; then
+          offenders="$offenders $f"
+        fi ;;
+    esac
+  done
+  if [ -n "${offenders// }" ]; then
+    die "print() in server code:$offenders"
+    note "    stdout belongs to the MCP stdio framing. Use cad_mcp._logging (stderr)."
+  else
+    ok "no stray print() in server code"
+  fi
+
+  # 4. Fast tests only; the full suite runs on pre-push and in CI.
+  if $RUN pytest -q -m "not geometry and not slow" -x >/dev/null 2>&1; then
+    ok "fast tests (~25s; geometry deferred to pre-push)"
+  else
+    die "fast tests failed (run: uv run pytest -m 'not geometry and not slow')"
+  fi
+fi
+
+# 5. A new tool must be registered and documented.
+for f in $staged_all; do
+  case "$f" in
+    src/cad_mcp/tools/*.py)
+      base=$(basename "$f" .py)
+      [ "$base" = "__init__" ] && continue
+      grep -q "$base" src/cad_mcp/server.py || die "tool '$base' is not registered in server.py"
+      grep -q "\`$base\`" README.md || die "tool '$base' has no row in README.md's tool table"
+      ;;
+  esac
+done
+
+if [ "$fail" -ne 0 ]; then
+  printf '\n%spre-commit failed. Fix the above, or --no-verify on a WIP branch.%s\n' "$RED" "$OFF"
+  exit 1
+fi
+printf '%spre-commit passed%s\n' "$GRN" "$OFF"
