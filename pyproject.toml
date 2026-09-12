@@ -83,6 +83,9 @@ follow_imports = "skip"
 
 [tool.ruff]
 src = ["src", "tests"]
+# Agent tooling under .claude/ is not part of the shipped package and is
+# not held to the package's lint rules; CI lints src/, tests/ and scripts/.
+extend-exclude = [".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
