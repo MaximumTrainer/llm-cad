@@ -1,13 +1,13 @@
 """list_parts tool — overview of assembly parts (SPEC 10.3)."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import ok
 
 
 def register(mcp: MCPServer) -> None:
@@ -36,9 +36,10 @@ def register(mcp: MCPServer) -> None:
             }
             parts.append(info)
 
-        return json.dumps({
-            "ok": True,
-            "active_part": sess.active_part,
-            "part_count": len(parts),
-            "parts": parts,
-        })
+        names = ", ".join(p["name"] for p in parts) or "none"
+        return ok(
+            f"{len(parts)} part(s): {names} (active: {sess.active_part})",
+            active_part=sess.active_part,
+            part_count=len(parts),
+            parts=parts,
+        )

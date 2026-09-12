@@ -1,13 +1,13 @@
 """export_model tool -- export model to various formats (assembly-aware)."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import export, session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import fail, ok
 from cad_mcp.paths import (
     UnsafeFilename,
     unique_output_path,
@@ -51,9 +51,10 @@ def register(mcp: MCPServer) -> None:
         fmt = format.lower()
 
         if fmt not in export.EXPORTERS:
-            return _err(
-                f"Unsupported format '{fmt}'. "
-                f"Choose from: {list(export.EXPORTERS)}"
+            return fail(
+                "ValueError",
+                f"Unsupported format '{fmt}'.",
+                hint=f"Choose from: {list(export.EXPORTERS)}.",
             )
 
         if parts is None or parts == "all":
@@ -65,13 +66,25 @@ def register(mcp: MCPServer) -> None:
         elif isinstance(parts, list):
             bad = [n for n in parts if n not in sess.parts]
             if bad:
-                return _err(f"Unknown parts: {bad}")
+                return fail(
+                    "PartNotFound",
+                    f"Unknown parts: {bad}.",
+                    hint=f"Available: {list(sess.parts)}.",
+                )
             export_names = [n for n in parts if sess.has_model(n)]
         else:
-            return _err(f"Invalid parts value: {parts}")
+            return fail(
+                "ValueError",
+                f"Invalid parts value: {parts!r}.",
+                hint='Use "all", "active", or a list of part names.',
+            )
 
         if not export_names:
-            return _err("No model to export. Run execute_cad first.")
+            return fail(
+                "NoModel",
+                "No model to export.",
+                hint="Run execute_cad to create geometry first.",
+            )
 
         ext = export.FORMAT_EXTENSIONS[fmt]
         base = filename or "model"
@@ -80,7 +93,7 @@ def register(mcp: MCPServer) -> None:
         try:
             validate_filename(base)
         except UnsafeFilename as exc:
-            return _err(str(exc))
+            return fail("UnsafeFilename", str(exc))
 
         output_dir = sess.output_dir()
 
@@ -110,12 +123,16 @@ def _export_single(
     try:
         result = export.export_model(brep, output_dir, fmt, fname, tolerance)
     except ValueError as exc:
-        return _err(str(exc))
+        return fail("ValueError", str(exc))
     except Exception as exc:
-        return _err(f"Export failed: {type(exc).__name__}: {exc}")
+        return fail(type(exc).__name__, f"Export failed: {exc}")
 
     sess.exports.append({"format": fmt, "path": result["path"]})
-    return json.dumps({"ok": True, **result})
+    return ok(
+        f"Exported {fmt.upper()} to {result['path']} "
+        f"({result['size_bytes']} bytes)",
+        **result,
+    )
 
 
 def _export_multi(
@@ -195,13 +212,13 @@ def _export_multi(
 
     exported.append(assembly_result)
 
-    return json.dumps({
-        "ok": True,
-        "files": exported,
-        "total_files": len(exported),
-    })
-
-
-def _err(message: str) -> str:
-    d: dict[str, Any] = {"ok": False, "error": message}
-    return json.dumps(d)
+    good = [f for f in exported if "error" not in f]
+    bad = [f for f in exported if "error" in f]
+    headline = (
+        f"Exported {len(good)} {fmt.upper()} file(s) to {output_dir}"
+    )
+    if bad:
+        headline += f"; {len(bad)} failed: " + ", ".join(
+            f"{f['part']} ({f['error']})" for f in bad
+        )
+    return ok(headline, files=exported, total_files=len(exported))

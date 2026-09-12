@@ -17,6 +17,8 @@ from cad_mcp import session
 from cad_mcp.resources import EXAMPLES
 from cad_mcp.server import mcp
 
+from .envelope_helpers import summary
+
 
 @pytest.fixture(autouse=True)
 def _clean_sessions() -> None:  # type: ignore[misc]
@@ -154,7 +156,7 @@ async def test_example_executes(name: str) -> None:
     """Every curated example must execute successfully."""
     code = EXAMPLES[name]
     result = await mcp.call_tool("execute_cad", {"code": code})
-    text = result.content[0].text  # type: ignore[union-attr]
+    text = summary(result)
 
     is_ok = text.startswith("OK")
     if not is_ok:

@@ -1,7 +1,6 @@
 """measure tool -- numeric measurements on the current model."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +8,7 @@ from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import fail, ok_data
 
 
 def _measure_bbox(brep_path: Path) -> dict[str, Any]:
@@ -158,6 +158,20 @@ def _measure_clearance(
     return result
 
 
+def _summarise(what: str, result: dict[str, Any]) -> str:
+    """One readable line per measurement kind."""
+    if what == "bbox":
+        d = result["dimensions"]
+        return f"bbox: {d['x']} x {d['y']} x {d['z']} mm"
+    if what == "volume":
+        return f"volume: {result['volume_mm3']} mm3"
+    if what == "faces":
+        return f"{result['face_count']} face(s)"
+    if what == "distance":
+        return f"distance: {result.get('distance_mm')} mm"
+    return what
+
+
 def register(mcp: MCPServer) -> None:
     @mcp.tool()
     @logged_tool("measure")
@@ -187,26 +201,38 @@ def register(mcp: MCPServer) -> None:
         what = what.lower().strip()
         valid = ("bbox", "volume", "faces", "distance", "clearance")
         if what not in valid:
-            return _err(
-                f"Invalid measurement '{what}'. Choose from: {list(valid)}"
+            return fail(
+                "ValueError",
+                f"Invalid measurement '{what}'.",
+                hint=f"Choose from: {list(valid)}.",
             )
 
         if what == "clearance":
             if not parts or len(parts) != 2:
-                return _err(
-                    "clearance requires parts=[\"part_a\", \"part_b\"]"
+                return fail(
+                    "ValueError",
+                    "clearance needs exactly two part names.",
+                    hint='Call measure(what="clearance", parts=["lid", "box"]).',
                 )
             try:
                 result = _measure_clearance(sess, parts)
             except Exception as exc:
-                return _err(f"Clearance failed: {type(exc).__name__}: {exc}")
+                return fail(type(exc).__name__, f"Clearance failed: {exc}")
             if "error" in result:
-                return _err(result["error"])
-            return json.dumps({"ok": True, "measurement": what, **result})
+                return fail("MeasurementError", str(result["error"]))
+            return ok_data(
+                f"clearance between {result['parts'][0]!r} and "
+                f"{result['parts'][1]!r}: {result['clearance_mm']} mm",
+                {"measurement": what, **result},
+            )
 
         brep = sess.brep_path()
         if not brep.exists():
-            return _err("No model to measure. Run execute_cad first.")
+            return fail(
+                "NoModel",
+                "No model to measure.",
+                hint="Run execute_cad to create geometry first.",
+            )
 
         try:
             if what == "bbox":
@@ -217,18 +243,19 @@ def register(mcp: MCPServer) -> None:
                 result = _measure_faces(brep)
             elif what == "distance":
                 if not from_selector or not to_selector:
-                    return _err(
-                        "distance requires from_selector and to_selector"
+                    return fail(
+                        "ValueError",
+                        "distance needs both from_selector and to_selector.",
+                        hint='e.g. from_selector=">Z", to_selector="<Z".',
                     )
                 result = _measure_distance(brep, from_selector, to_selector)
             else:
-                return _err(f"Unknown measurement: {what}")
+                return fail("ValueError", f"Unknown measurement: {what}")
         except Exception as exc:
-            return _err(f"Measurement failed: {type(exc).__name__}: {exc}")
+            return fail(type(exc).__name__, f"Measurement failed: {exc}")
 
-        return json.dumps({"ok": True, "measurement": what, **result})
-
-
-def _err(message: str) -> str:
-    d: dict[str, Any] = {"ok": False, "error": message}
-    return json.dumps(d)
+        if "error" in result:
+            return fail("MeasurementError", str(result["error"]))
+        return ok_data(
+            _summarise(what, result), {"measurement": what, **result}
+        )

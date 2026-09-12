@@ -1,15 +1,14 @@
 """execute_cad tool — run CadQuery code in a sandbox."""
 from __future__ import annotations
 
-import json
 import os
 import uuid
-from typing import Any
 
 from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import sandbox, session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import fail, ok
 
 
 def register(mcp: MCPServer) -> None:
@@ -37,9 +36,10 @@ def register(mcp: MCPServer) -> None:
             or error type, line number, code snippet, and a hint on failure.
         """
         if mode not in ("replace", "append"):
-            return _err(
+            return fail(
                 "ValueError",
-                f"Invalid mode '{mode}'. Use 'replace' or 'append'.",
+                f"Invalid mode '{mode}'.",
+                hint="Use mode='replace' to start fresh or 'append' to add.",
             )
 
         sess = session.for_context(ctx)
@@ -51,14 +51,16 @@ def register(mcp: MCPServer) -> None:
             part = sess.get_active_part()
 
             if part.source != "cadquery" and part.code_history:
-                return _err(
+                return fail(
                     "NotReproducible",
                     f"Part '{part.name}' holds AI-generated mesh geometry, "
-                    f"which is not reproducible from code, so running "
-                    f"execute_cad here would destroy it. Use "
-                    f"create_part(name=...) to model alongside it, "
-                    f"set_active_part to target a CadQuery part, or "
-                    f"delete_part first if you meant to replace it.",
+                    f"which cannot be reproduced from code — running "
+                    f"execute_cad here would destroy it.",
+                    hint=(
+                        "create_part(name=...) to model alongside it, "
+                        "set_active_part to target a CadQuery part, or "
+                        "delete_part first if you meant to replace it."
+                    ),
                 )
 
             prev_history = list(part.code_history)
@@ -85,13 +87,18 @@ def register(mcp: MCPServer) -> None:
                 part.code_history = prev_history
                 staged.unlink(missing_ok=True)
 
-            return result.format_for_llm()
-
-
-def _err(error_type: str, message: str) -> str:
-    d: dict[str, Any] = {
-        "ok": False,
-        "error_type": error_type,
-        "message": message,
-    }
-    return json.dumps(d)
+            if not result.ok:
+                return fail(
+                    result.error_type or "ExecutionError",
+                    result.message or "Execution failed.",
+                    line=result.line,
+                    snippet=result.snippet,
+                    hint=result.hint,
+                )
+            return ok(
+                result.format_for_llm(),
+                solid_count=result.solid_count,
+                bbox=result.bbox,
+                part=part.name,
+                code_blocks=len(part.code_history),
+            )

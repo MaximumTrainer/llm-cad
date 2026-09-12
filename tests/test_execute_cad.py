@@ -9,12 +9,12 @@ Covers:
 """
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from cad_mcp import session
 from cad_mcp.server import mcp
+
+from .envelope_helpers import flat, summary
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,7 +49,7 @@ def _clean_sessions() -> None:  # type: ignore[misc]
 
 
 def _text(result: object) -> str:
-    return result.content[0].text  # type: ignore[union-attr]
+    return summary(result)
 
 
 # ---------------------------------------------------------------------------
@@ -66,8 +66,10 @@ async def test_box_executes() -> None:
 
 @pytest.mark.anyio
 async def test_bracket_executes() -> None:
-    text = _text(await mcp.call_tool("execute_cad", {"code": BRACKET_CODE}))
-    assert "OK" in text
+    result = await mcp.call_tool("execute_cad", {"code": BRACKET_CODE})
+    payload = flat(result)
+    assert payload["ok"], f"bracket failed: {payload}"
+    assert payload["summary"].startswith("OK")
 
 
 @pytest.mark.anyio
@@ -138,8 +140,7 @@ async def test_invalid_mode() -> None:
 @pytest.mark.anyio
 async def test_list_session() -> None:
     await mcp.call_tool("execute_cad", {"code": BOX_CODE})
-    text = _text(await mcp.call_tool("list_session", {}))
-    data = json.loads(text)
+    data = flat(await mcp.call_tool("list_session", {}))
     assert data["code_blocks"] == 1
     assert data["has_model"] is True
     assert data["current_bbox"] is not None
@@ -149,8 +150,7 @@ async def test_list_session() -> None:
 async def test_reset_session() -> None:
     await mcp.call_tool("execute_cad", {"code": BOX_CODE})
     await mcp.call_tool("reset_session", {})
-    text = _text(await mcp.call_tool("list_session", {}))
-    data = json.loads(text)
+    data = flat(await mcp.call_tool("list_session", {}))
     assert data["code_blocks"] == 0
     assert data["has_model"] is False
 

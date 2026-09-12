@@ -23,6 +23,8 @@ from cad_mcp.meshy import (
 )
 from cad_mcp.server import mcp
 
+from .envelope_helpers import flat
+
 
 @pytest.fixture(autouse=True)
 def _clean_sessions() -> None:  # type: ignore[misc]
@@ -202,9 +204,10 @@ class TestGenAiMeshTool:
             os.environ.pop("MESHY_API_KEY", None)
             result = await mcp.call_tool("gen_ai_mesh", {"prompt": "a cube"})
 
-        data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+        data = flat(result)
         assert data["ok"] is False
-        assert data["error"] == "missing_api_key"
+        assert data["error_type"] == "MissingAPIKey"
+        assert "MESHY_API_KEY" in data["hint"]
         assert "MESHY_API_KEY" in data["hint"]
 
     @pytest.mark.anyio
@@ -242,7 +245,7 @@ class TestGenAiMeshTool:
                 "gen_ai_mesh", {"prompt": "a simple chess pawn"}
             )
 
-        data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+        data = flat(result)
         assert data["ok"] is True
         assert data["task_id"] == "task-ok"
         assert data["vertex_count"] > 0
@@ -274,9 +277,9 @@ class TestGenAiMeshTool:
                 "gen_ai_mesh", {"prompt": "something complex"}
             )
 
-        data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+        data = flat(result)
         assert data["ok"] is False
-        assert data["error"] == "generation_timeout"
+        assert data["error_type"] == "GenerationTimeout"
         assert data["task_id"] == "task-slow"
 
     @pytest.mark.anyio
@@ -297,9 +300,9 @@ class TestGenAiMeshTool:
                 "gen_ai_mesh", {"prompt": "a cube"}
             )
 
-        data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+        data = flat(result)
         assert data["ok"] is False
-        assert data["error"] == "meshy_api_error"
+        assert data["error_type"] == "MeshyAPIError"
         assert data["status"] == 429
 
     @pytest.mark.anyio
@@ -380,7 +383,7 @@ class TestGenAiMeshTool:
         result = await mcp.call_tool(
             "export_model", {"format": "stl", "filename": "ai_mesh"}
         )
-        data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+        data = flat(result)
         assert data["ok"] is True
         assert Path(data["path"]).exists()
 
@@ -434,7 +437,7 @@ class TestGenAiMeshTool:
                 {"prompt": "a detailed figurine", "refine": True},
             )
 
-        data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+        data = flat(result)
         assert data["ok"] is True
         assert data["task_id"] == "task-refine"
         mock_meshy.create_refine.assert_called_once_with(

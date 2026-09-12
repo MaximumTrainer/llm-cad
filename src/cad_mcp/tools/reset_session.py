@@ -5,6 +5,7 @@ from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import ok
 
 
 def register(mcp: MCPServer) -> None:
@@ -15,4 +16,6 @@ def register(mcp: MCPServer) -> None:
 
         Call this to start a completely new design from scratch.
         """
-        return session.reset(session.resolve_id(ctx))
+        sid = session.resolve_id(ctx)
+        message = session.reset(sid)
+        return ok(message, session_id=sid)

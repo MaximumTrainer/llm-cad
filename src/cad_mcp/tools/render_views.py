@@ -8,6 +8,7 @@ from mcp.types import ImageContent, TextContent
 
 from cad_mcp import render, session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import fail
 from cad_mcp.render import PartMesh, apply_transform, color_rgb
 
 
@@ -41,7 +42,11 @@ def register(mcp: MCPServer) -> None:
             if bad:
                 return [TextContent(
                     type="text",
-                    text=f"Unknown parts: {bad}. Available: {list(sess.parts)}",
+                    text=fail(
+                        "PartNotFound",
+                        f"Unknown parts: {bad}.",
+                        hint=f"Available: {list(sess.parts)}.",
+                    ),
                 )]
             render_parts = [sess.parts[n] for n in parts]
         else:
@@ -67,27 +72,30 @@ def register(mcp: MCPServer) -> None:
             return [
                 TextContent(
                     type="text",
-                    text=(
-                        "No model to render. Run execute_cad first to "
-                        "create a shape."
+                    text=fail(
+                        "NoModel",
+                        "No model to render.",
+                        hint="Run execute_cad to create geometry first.",
                     ),
                 )
             ]
 
         try:
-            if len(part_meshes) == 1:
-                png_bytes = render.render_assembly(
-                    part_meshes, views, width, height
-                )
-            else:
-                png_bytes = render.render_assembly(
-                    part_meshes, views, width, height
-                )
+            png_bytes = render.render_assembly(
+                part_meshes, views, width, height
+            )
         except Exception as exc:
             return [
                 TextContent(
                     type="text",
-                    text=f"Render failed: {type(exc).__name__}: {exc}",
+                    text=fail(
+                        type(exc).__name__,
+                        f"Render failed: {exc}",
+                        hint=(
+                            "Try fewer views, a smaller width/height, or a "
+                            "simpler model."
+                        ),
+                    ),
                 )
             ]
 

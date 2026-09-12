@@ -5,7 +5,6 @@ reset) and CAD-006 (token comparison, host allowlist).
 """
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 from pathlib import Path
@@ -17,6 +16,8 @@ from cad_mcp import session
 from cad_mcp.paths import UnsafeFilename, safe_output_path, validate_filename
 from cad_mcp.server import mcp
 from cad_mcp.transport import BearerTokenVerifier, TransportConfig
+
+from .envelope_helpers import flat, summary
 
 BOX = "import cadquery as cq\nresult = cq.Workplane('XY').box(10, 10, 10)"
 
@@ -77,15 +78,15 @@ def test_export_rejects_traversal_and_writes_nothing() -> None:
     escaped = Path.home() / "cadmcp_export_escape.stl"
     escaped.unlink(missing_ok=True)
 
-    async def scenario() -> str:
+    async def scenario() -> dict[str, object]:
         await mcp.call_tool("execute_cad", {"code": BOX})
         result = await mcp.call_tool(
             "export_model",
             {"format": "stl", "filename": "../../../../cadmcp_export_escape"},
         )
-        return result.content[0].text  # type: ignore[union-attr]
+        return flat(result)
 
-    payload = json.loads(anyio.run(scenario))
+    payload = anyio.run(scenario)
 
     assert payload["ok"] is False
     assert "Invalid filename" in payload["error"]
@@ -93,14 +94,14 @@ def test_export_rejects_traversal_and_writes_nothing() -> None:
 
 
 def test_export_returns_a_resolved_path() -> None:
-    async def scenario() -> str:
+    async def scenario() -> dict[str, object]:
         await mcp.call_tool("execute_cad", {"code": BOX})
         result = await mcp.call_tool(
             "export_model", {"format": "stl", "filename": "bracket"}
         )
-        return result.content[0].text  # type: ignore[union-attr]
+        return flat(result)
 
-    payload = json.loads(anyio.run(scenario))
+    payload = anyio.run(scenario)
     assert payload["ok"] is True
     path = Path(payload["path"])
     assert path.is_absolute()
@@ -121,9 +122,9 @@ def test_exports_survive_reset_session() -> None:
         exported = await mcp.call_tool(
             "export_model", {"format": "stl", "filename": "keepme"}
         )
-        path = json.loads(exported.content[0].text)["path"]  # type: ignore[union-attr]
+        path = flat(exported)["path"]  # type: ignore[union-attr]
         reset = await mcp.call_tool("reset_session", {})
-        return path, reset.content[0].text  # type: ignore[union-attr]
+        return path, summary(reset)
 
     path, message = anyio.run(scenario)
 
@@ -240,8 +241,8 @@ def test_export_collisions_do_not_overwrite() -> None:
             "export_model", {"format": "stl", "filename": "dupe"}
         )
         return (
-            json.loads(first.content[0].text)["path"],  # type: ignore[union-attr]
-            json.loads(second.content[0].text)["path"],  # type: ignore[union-attr]
+            flat(first)["path"],  # type: ignore[union-attr]
+            flat(second)["path"],  # type: ignore[union-attr]
         )
 
     first, second = anyio.run(scenario)

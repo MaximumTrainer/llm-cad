@@ -168,7 +168,8 @@ def resolve_id(ctx: Any = None) -> str:
 
 def get_or_create(session_id: str = DEFAULT_SESSION_ID) -> Session:
     with _sessions_lock:
-        evict_idle()
+        # Never sweep the session we are about to hand out.
+        evict_idle(keep=session_id)
         sess = _sessions.get(session_id)
         if sess is None:
             tmpdir = Path(tempfile.mkdtemp(prefix=_SESSION_PREFIX))
@@ -183,22 +184,42 @@ def for_context(ctx: Any = None) -> Session:
     return get_or_create(resolve_id(ctx))
 
 
-def evict_idle(now: float | None = None) -> list[str]:
-    """Drop sessions unused for longer than the idle timeout."""
+def evict_idle(
+    now: float | None = None, keep: str | None = None
+) -> list[str]:
+    """Drop sessions unused for longer than the idle timeout.
+
+    Three things are deliberately never evicted, because getting this
+    wrong destroys a live model mid-conversation:
+
+    * the session named by *keep* — the one the current request is for;
+    * the stdio session, which has exactly one client for the lifetime of
+      the process and so is never "disconnected" (SPEC 10.1 H4 is about
+      HTTP session cleanup);
+    * any session whose lock is held, i.e. a request is in flight.
+    """
     timeout = idle_timeout_s()
     if timeout <= 0:
         return []
     current = time.monotonic() if now is None else now
+    evicted: list[str] = []
+
     with _sessions_lock:
-        stale = [
-            sid
-            for sid, s in _sessions.items()
-            if current - s.last_used > timeout
-        ]
-        for sid in stale:
-            _sessions[sid].cleanup()
-            del _sessions[sid]
-    return stale
+        for sid, sess in list(_sessions.items()):
+            if sid in (keep, DEFAULT_SESSION_ID):
+                continue
+            if current - sess.last_used <= timeout:
+                continue
+            # A held lock means a tool is still running against it.
+            if not sess.lock.acquire(blocking=False):
+                continue
+            try:
+                sess.cleanup()
+                del _sessions[sid]
+                evicted.append(sid)
+            finally:
+                sess.lock.release()
+    return evicted
 
 
 def active_ids() -> list[str]:

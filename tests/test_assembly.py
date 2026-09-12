@@ -7,7 +7,6 @@ and >0 when separated; all v1 tests still pass.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +14,8 @@ import pytest
 
 from cad_mcp import session
 from cad_mcp.server import mcp
+
+from .envelope_helpers import flat, part_report, summary
 
 BOX_CODE = """\
 import cadquery as cq
@@ -33,9 +34,8 @@ def _clean_sessions() -> None:  # type: ignore[misc]
 
 
 def _data(result: Any) -> dict[str, Any]:
-    """Extract JSON from an MCP tool result."""
-    text = result.content[0].text  # type: ignore[union-attr]
-    return json.loads(text)
+    """The tool's payload, flattened. Validates the envelope on the way."""
+    return flat(result)
 
 
 # ------------------------------------------------------------------
@@ -415,7 +415,7 @@ class TestBackwardCompat:
         result = await mcp.call_tool(
             "execute_cad", {"code": BOX_CODE}
         )
-        text = result.content[0].text  # type: ignore[union-attr]
+        text = summary(result)
         assert "OK" in text
 
         sess = session.get_or_create()
@@ -462,8 +462,10 @@ class TestPartValidation:
             "validate_mesh", {"part": "main"}
         )
         data = _data(result)
-        assert "part" in data
-        assert data["part"] == "main"
+        # One part and many now return the same shape (CAD-019), so the
+        # per-part report lives under data.parts rather than at the top.
+        assert [p["part"] for p in data["parts"]] == ["main"]
+        assert part_report(result, "main")["watertight"] is True
 
     @pytest.mark.anyio
     async def test_position_then_render(self) -> None:

@@ -10,13 +10,14 @@ Gate tests from SPEC / Phase 3:
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
 
 from cad_mcp import session
 from cad_mcp.server import mcp
+
+from .envelope_helpers import flat, part_report
 
 BOX_CODE = """\
 import cadquery as cq
@@ -71,13 +72,13 @@ async def _build(code: str) -> None:
 async def test_valid_box_passes_all_checks() -> None:
     await _build(BOX_CODE)
     result = await mcp.call_tool("validate_mesh", {})
-    report = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    report = part_report(result)
 
     assert report["watertight"] is True
     assert report["manifold"] is True
     assert report["volume_mm3"] > 0
     assert report["mass_pla_g"] > 0
-    assert report["printable"] is True
+    assert flat(result)["printable"] is True
 
 
 @pytest.mark.anyio
@@ -105,7 +106,7 @@ async def test_thin_wall_flagged() -> None:
     """Gate: 0.8mm wall flagged under default 1.2mm threshold."""
     await _build(THIN_WALL_CODE)
     result = await mcp.call_tool("validate_mesh", {})
-    report = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    report = part_report(result)
 
     wall = report["wall_thickness"]
     assert wall["violations"] > 0, (
@@ -119,7 +120,7 @@ async def test_thin_wall_flagged() -> None:
 @pytest.mark.anyio
 async def test_validate_no_model_error() -> None:
     result = await mcp.call_tool("validate_mesh", {})
-    report = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    report = flat(result)
     assert report["ok"] is False
     assert "No model" in report["error"]
 
@@ -133,7 +134,7 @@ async def test_validate_no_model_error() -> None:
 async def test_measure_bbox() -> None:
     await _build(BOX_CODE)
     result = await mcp.call_tool("measure", {"what": "bbox"})
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
 
     assert data["ok"] is True
     dims = data["dimensions"]
@@ -146,7 +147,7 @@ async def test_measure_bbox() -> None:
 async def test_measure_volume() -> None:
     await _build(BOX_CODE)
     result = await mcp.call_tool("measure", {"what": "volume"})
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
 
     assert data["ok"] is True
     assert abs(data["volume_mm3"] - 15000.0) < 1.0
@@ -156,7 +157,7 @@ async def test_measure_volume() -> None:
 async def test_measure_faces() -> None:
     await _build(BOX_CODE)
     result = await mcp.call_tool("measure", {"what": "faces"})
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
 
     assert data["ok"] is True
     assert data["face_count"] == 6
@@ -170,7 +171,7 @@ async def test_measure_distance() -> None:
         "measure",
         {"what": "distance", "from_selector": ">Z", "to_selector": "<Z"},
     )
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
 
     assert data["ok"] is True
     assert abs(data["distance_mm"] - 10.0) < 0.1
@@ -179,7 +180,7 @@ async def test_measure_distance() -> None:
 @pytest.mark.anyio
 async def test_measure_no_model_error() -> None:
     result = await mcp.call_tool("measure", {"what": "bbox"})
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
     assert data["ok"] is False
 
 
@@ -195,7 +196,7 @@ async def test_export_step() -> None:
     result = await mcp.call_tool(
         "export_model", {"format": "step", "filename": "box"}
     )
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
 
     assert data["ok"] is True
     assert data["format"] == "step"
@@ -223,12 +224,12 @@ async def test_export_stl_deterministic() -> None:
     result1 = await mcp.call_tool(
         "export_model", {"format": "stl", "filename": "box1"}
     )
-    data1 = json.loads(result1.content[0].text)  # type: ignore[union-attr]
+    data1 = flat(result1)
 
     result2 = await mcp.call_tool(
         "export_model", {"format": "stl", "filename": "box2"}
     )
-    data2 = json.loads(result2.content[0].text)  # type: ignore[union-attr]
+    data2 = flat(result2)
 
     hash1 = hashlib.sha256(Path(data1["path"]).read_bytes()).hexdigest()
     hash2 = hashlib.sha256(Path(data2["path"]).read_bytes()).hexdigest()
@@ -241,7 +242,7 @@ async def test_export_glb() -> None:
     result = await mcp.call_tool(
         "export_model", {"format": "glb", "filename": "box"}
     )
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
 
     assert data["ok"] is True
     assert Path(data["path"]).exists()
@@ -252,7 +253,7 @@ async def test_export_no_model_error() -> None:
     result = await mcp.call_tool(
         "export_model", {"format": "stl"}
     )
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
     assert data["ok"] is False
 
 
@@ -262,7 +263,7 @@ async def test_export_invalid_format() -> None:
     result = await mcp.call_tool(
         "export_model", {"format": "obj"}
     )
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
     assert data["ok"] is False
 
 

@@ -1,13 +1,13 @@
 """validate_mesh tool -- mesh quality, printability, and interference checks."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session, validate
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import fail, ok_data
 
 
 def register(mcp: MCPServer) -> None:
@@ -42,9 +42,10 @@ def register(mcp: MCPServer) -> None:
 
         if part is not None:
             if part not in sess.parts:
-                return _err(
-                    f"Part '{part}' not found. "
-                    f"Available: {list(sess.parts.keys())}"
+                return fail(
+                    "PartNotFound",
+                    f"Part '{part}' not found.",
+                    hint=f"Available: {list(sess.parts.keys())}.",
                 )
             parts_to_validate = [part]
         else:
@@ -53,7 +54,11 @@ def register(mcp: MCPServer) -> None:
             ]
 
         if not parts_to_validate:
-            return _err("No model to validate. Run execute_cad first.")
+            return fail(
+                "NoModel",
+                "No model to validate.",
+                hint="Run execute_cad to create geometry first.",
+            )
 
         per_part: list[dict[str, Any]] = []
         all_issues: list[str] = []
@@ -97,17 +102,26 @@ def register(mcp: MCPServer) -> None:
                         f"{item['volume_mm3']:.3f} mm³ overlap"
                     )
 
-        if len(per_part) == 1 and not interference:
-            return json.dumps(per_part[0], indent=2)
+        printable = len(all_issues) == 0
+        if printable:
+            headline = f"Printable: {len(per_part)} part(s), no issues found"
+        else:
+            headline = (
+                f"{len(all_issues)} issue(s) across {len(per_part)} part(s): "
+                + "; ".join(all_issues[:3])
+            )
+            if len(all_issues) > 3:
+                headline += f"; +{len(all_issues) - 3} more"
 
-        result: dict[str, Any] = {
-            "ok": True,
-            "parts": per_part,
-            "interference": interference,
-            "issues": all_issues,
-            "printable": len(all_issues) == 0,
-        }
-        return json.dumps(result, indent=2)
+        return ok_data(
+            headline,
+            {
+                "parts": per_part,
+                "interference": interference,
+                "issues": all_issues,
+                "printable": printable,
+            },
+        )
 
 
 def _check_all_interference(
@@ -141,8 +155,3 @@ def _check_all_interference(
                     "error": str(exc),
                 })
     return results
-
-
-def _err(message: str) -> str:
-    d: dict[str, Any] = {"ok": False, "error": message}
-    return json.dumps(d)

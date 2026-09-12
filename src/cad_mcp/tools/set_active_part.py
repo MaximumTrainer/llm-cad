@@ -1,13 +1,11 @@
 """set_active_part tool — switch which part execute_cad targets (SPEC 10.3)."""
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from mcp.server.mcpserver import Context, MCPServer
 
 from cad_mcp import session
 from cad_mcp._logging import logged_tool
+from cad_mcp.envelope import fail, ok
 
 
 def register(mcp: MCPServer) -> None:
@@ -28,23 +26,20 @@ def register(mcp: MCPServer) -> None:
 
         if name not in sess.parts:
             names = list(sess.parts.keys())
-            return _err(
-                f"Part '{name}' does not exist. "
-                f"Available parts: {names}"
+            return fail(
+                "PartNotFound",
+                f"Part '{name}' does not exist.",
+                hint=f"Available parts: {names}. Create one with create_part.",
             )
 
         sess.active_part = name
         part = sess.parts[name]
 
-        return json.dumps({
-            "ok": True,
-            "active_part": name,
-            "color": part.color,
-            "code_blocks": len(part.code_history),
-            "has_model": sess.brep_path(name).exists(),
-        })
-
-
-def _err(message: str) -> str:
-    d: dict[str, Any] = {"ok": False, "error": message}
-    return json.dumps(d)
+        return ok(
+            f"Active part is now '{name}' "
+            f"({len(part.code_history)} code block(s))",
+            active_part=name,
+            color=part.color,
+            code_blocks=len(part.code_history),
+            has_model=sess.brep_path(name).exists(),
+        )

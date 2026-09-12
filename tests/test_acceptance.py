@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -15,6 +14,8 @@ import pytest
 from cad_mcp import session
 from cad_mcp.resources import EXAMPLES
 from cad_mcp.server import mcp
+
+from .envelope_helpers import flat, part_report, summary
 
 BRACKET_CODE = EXAMPLES["bracket"]
 
@@ -34,7 +35,7 @@ async def test_spec_9_1_bracket_to_watertight_stl() -> None:
     """From the bracket example, produce a validated watertight STL."""
     # Iteration 1: execute
     result = await mcp.call_tool("execute_cad", {"code": BRACKET_CODE})
-    text = result.content[0].text  # type: ignore[union-attr]
+    text = summary(result)
     assert text.startswith("OK"), f"execute_cad failed: {text}"
 
     # Render (mandatory per workflow)
@@ -44,7 +45,7 @@ async def test_spec_9_1_bracket_to_watertight_stl() -> None:
 
     # Validate
     result = await mcp.call_tool("validate_mesh", {})
-    report = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    report = part_report(result)
     assert report["watertight"], f"Not watertight: {report}"
     assert report["manifold"], f"Not manifold: {report}"
 
@@ -52,7 +53,7 @@ async def test_spec_9_1_bracket_to_watertight_stl() -> None:
     result = await mcp.call_tool(
         "export_model", {"format": "stl", "filename": "bracket"}
     )
-    exp = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    exp = flat(result)
     assert exp["ok"], f"STL export failed: {exp}"
     assert Path(exp["path"]).exists()
     assert exp["size_bytes"] > 1000
@@ -69,7 +70,7 @@ async def test_spec_9_2_measure_dimensions() -> None:
     await mcp.call_tool("execute_cad", {"code": BRACKET_CODE})
 
     result = await mcp.call_tool("measure", {"what": "bbox"})
-    data = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    data = flat(result)
     assert data["ok"]
 
     dims = data["dimensions"]
@@ -87,7 +88,7 @@ async def test_spec_9_2_measure_dimensions() -> None:
 
     # Verify volume is a positive number
     result = await mcp.call_tool("measure", {"what": "volume"})
-    vol = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    vol = flat(result)
     assert vol["ok"]
     assert vol["volume_mm3"] > 100
 
@@ -112,5 +113,5 @@ async def test_spec_9_2_measure_dimensions() -> None:
 @pytest.mark.anyio
 async def test_spec_9_4_server_starts_and_pings() -> None:
     result = await mcp.call_tool("ping", {})
-    text = result.content[0].text  # type: ignore[union-attr]
+    text = summary(result)
     assert "pong" in text.lower()

@@ -5,7 +5,6 @@ Covers CAD-007 (every tool shared one global session) and CAD-008
 """
 from __future__ import annotations
 
-import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,6 +14,8 @@ import anyio
 import pytest
 
 from cad_mcp import session
+
+from .envelope_helpers import flat, summary
 
 BOX_10 = "import cadquery as cq\nresult = cq.Workplane('XY').box(10, 10, 10)"
 BOX_50 = "import cadquery as cq\nresult = cq.Workplane('XY').box(50, 50, 50)"
@@ -132,8 +133,8 @@ def test_two_sessions_do_not_see_each_others_models() -> None:
         with as_session("sess-b"):
             rb = await mcp.call_tool("measure", {"what": "bbox"})
         return (
-            json.loads(ra.content[0].text),  # type: ignore[union-attr]
-            json.loads(rb.content[0].text),  # type: ignore[union-attr]
+            flat(ra),  # type: ignore[union-attr]
+            flat(rb),  # type: ignore[union-attr]
         )
 
     a_box, b_box = anyio.run(scenario)
@@ -152,7 +153,7 @@ def test_code_history_does_not_leak_between_sessions() -> None:
             await mcp.call_tool("execute_cad", {"code": BOX_10})
         with as_session("other"):
             listed = await mcp.call_tool("list_session", {})
-        return json.loads(listed.content[0].text)  # type: ignore[union-attr]
+        return flat(listed)
 
     other = anyio.run(scenario)
     assert other["session_id"] == "other"
@@ -171,7 +172,7 @@ def test_reset_only_affects_the_calling_session() -> None:
             await mcp.call_tool("reset_session", {})
         with as_session("keeper"):
             listed = await mcp.call_tool("list_session", {})
-        return bool(json.loads(listed.content[0].text)["has_model"])  # type: ignore[union-attr]
+        return bool(flat(listed)["has_model"])  # type: ignore[union-attr]
 
     assert anyio.run(scenario), "reset_session wiped an unrelated session"
 
@@ -208,6 +209,78 @@ def test_active_sessions_are_not_evicted(
     assert "busy" in session.active_ids()
 
 
+def test_the_requested_session_is_never_swept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eviction must not destroy the session the caller is asking for.
+
+    Found the hard way: under load a gap between two tool calls exceeded
+    the idle timeout and `validate_mesh` reported NoModel for a model
+    that had just been built.
+    """
+    monkeypatch.setenv("CAD_MCP_SESSION_IDLE_TIMEOUT_S", "0.001")
+    ctx = FakeContext("in-use")
+    first = session.for_context(ctx)
+    import time
+
+    time.sleep(0.05)
+    again = session.for_context(ctx)
+    assert again is first, "the in-flight session was evicted and recreated"
+    assert first.tmpdir.exists()
+
+
+def test_stdio_default_session_is_never_evicted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stdio has one client for the process lifetime; H4 is about HTTP."""
+    monkeypatch.setenv("CAD_MCP_SESSION_IDLE_TIMEOUT_S", "0.001")
+    sess = session.get_or_create()
+    import time
+
+    time.sleep(0.05)
+    assert session.evict_idle() == []
+    assert sess.tmpdir.exists()
+
+
+def test_a_session_with_a_held_lock_is_not_evicted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held lock means a tool is mid-flight against that session.
+
+    The lock must be held by a *different* thread: it is an RLock, so a
+    same-thread `acquire(blocking=False)` would succeed and the test
+    would prove nothing.
+    """
+    import time
+
+    monkeypatch.setenv("CAD_MCP_SESSION_IDLE_TIMEOUT_S", "0.001")
+    sess = session.for_context(FakeContext("working"))
+    time.sleep(0.05)
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with sess.lock:
+            holding.set()
+            release.wait(timeout=10)
+
+    worker = threading.Thread(target=hold, daemon=True)
+    worker.start()
+    assert holding.wait(timeout=5)
+
+    assert session.evict_idle() == [], (
+        "evicted a session with a request in flight"
+    )
+    assert sess.tmpdir.exists()
+
+    release.set()
+    worker.join(timeout=5)
+
+    # Lock released: it may now be swept.
+    assert "working" in session.evict_idle()
+
+
 def test_idle_timeout_default_is_300s(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CAD_MCP_SESSION_IDLE_TIMEOUT_S", raising=False)
     assert session.idle_timeout_s() == 300.0
@@ -236,7 +309,7 @@ def test_concurrent_executes_produce_whole_not_mixed_geometry() -> None:
         async def go() -> str:
             with as_session("concurrent"):
                 result = await mcp.call_tool("execute_cad", {"code": code})
-            return result.content[0].text  # type: ignore[union-attr]
+            return summary(result)
 
         return anyio.run(go)  # type: ignore[no-any-return]
 
@@ -319,7 +392,7 @@ def test_failed_run_does_not_clobber_good_geometry() -> None:
                 "execute_cad", {"code": "result = nope()"}
             )
             after = sess.brep_path().read_bytes()
-        return before, after, bad.content[0].text  # type: ignore[union-attr]
+        return before, after, summary(bad)
 
     before, after, message = anyio.run(scenario)
     assert before == after, "A failed run overwrote the previous geometry"
