@@ -122,6 +122,9 @@ class Session:
                 "translate": list(part.translate),
                 "rotate": list(part.rotate),
                 "bbox": part.bbox,
+                "source": part.source,
+                "reproducible_from_code": part.source == "cadquery",
+                "ai_prompt": part.ai_prompt,
                 "is_active": name == self.active_part,
             })
 
@@ -132,6 +135,7 @@ class Session:
             "parts": parts_info,
             "code_blocks": len(active.code_history),
             "code": active.accumulated_code() if active.code_history else None,
+            "active_part_source": active.source,
             "current_bbox": active.bbox,
             "exports": self.exports,
             "has_model": self.has_model(),

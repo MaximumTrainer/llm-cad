@@ -31,29 +31,175 @@ def emit(payload: dict[str, object]) -> None:
     print(blob)
 
 
-def _add_hint(msg: str, snippet: str | None = None) -> str | None:
+# (matcher, hint) pairs, tried in order. A table rather than a chain of
+# ifs so adding a rule is a one-line change.
+#
+# Written because the live-LLM test showed a model make 16 tool calls and
+# never recover: "Cannot find a solid on the stack or in the parent chain"
+# fired seven times with no hint attached, so each attempt gave it no new
+# information (CAD-034). Hints are prescriptive — what to do next — not
+# descriptive.
+_HINTS: tuple[tuple[str, str], ...] = (
+    (
+        "nth element of an empty list",
+        "The chain is empty: a selector such as .faces()/.edges() "
+        "matched nothing, or there is no solid yet. Build geometry first "
+        "with .box()/.extrude()/.revolve(), and check the selector with "
+        "measure(what='faces').",
+    ),
+    (
+        "supported names are",
+        "Invalid plane name. Use 'XY', 'XZ', 'YZ' (or 'front', 'top', "
+        "'right'). Selectors are different: '>Z', '<Z', '|Z', '#Z'.",
+    ),
+    (
+        "cannot find a solid on the stack",
+        "The chain has no solid yet: .faces()/.workplane()/.hole()/"
+        ".shell() need an existing solid. Build one first with .box(), "
+        ".extrude() or .revolve(), and keep a single chain rather than "
+        "reassigning `result` from a fresh cq.Workplane().",
+    ),
+    (
+        "cannot find a solid",
+        "No solid in the chain. Create geometry with .box(), .extrude() "
+        "or .revolve() before selecting faces or cutting holes.",
+    ),
+    (
+        "expected {'xy' | 'xz'",
+        "Invalid plane or selector string. Planes are 'XY', 'XZ', 'YZ'. "
+        "Selectors look like '>Z', '<Z', '|Z', '#Z', '>X[1]'.",
+    ),
+    (
+        "line continuation character",
+        "The code contains stray escape characters. Send plain Python "
+        "source, not an escaped string: real newlines, no backslash-n.",
+    ),
+    (
+        "unexpected character after line continuation",
+        "The code contains stray escape characters. Send plain Python "
+        "source with real newlines.",
+    ),
+    (
+        "brep_api",
+        "An OCP kernel operation failed. Check fillet/chamfer radii "
+        "against the available edge length, and make sure boolean "
+        "operands actually overlap.",
+    ),
+    (
+        "standard_nullobject",
+        "An operation produced an empty shape. A boolean whose operands "
+        "do not overlap, or a cut that removed everything, gives a null "
+        "result.",
+    ),
+)
+
+_FILLET_WORDS = ("radius", "exceed", "impossible", "failed", "command not done")
+_CHAMFER_WORDS = ("distance", "exceed", "failed", "command not done")
+
+# Methods LLMs commonly hallucinate, and what they usually meant.
+_METHOD_SUGGESTIONS = {
+    "pushtotop": "pushPoints",
+    "cutthrough": "cutThruAll",
+    "cutout": "cutBlind or cut",
+    "addhole": "hole or cboreHole",
+    "makebox": "box",
+    "extrudelinear": "extrude",
+}
+
+
+def _workplane_suggestions(name: str) -> str:
+    """Near-matches for a hallucinated Workplane method."""
+    lowered = name.lower()
+    if lowered in _METHOD_SUGGESTIONS:
+        return _METHOD_SUGGESTIONS[lowered]
+    try:
+        import difflib
+
+        import cadquery
+
+        candidates = [
+            attr
+            for attr in dir(cadquery.Workplane)
+            if not attr.startswith("_")
+        ]
+        close = difflib.get_close_matches(name, candidates, n=3, cutoff=0.6)
+        return ", ".join(close)
+    except Exception:
+        return ""
+
+
+def _add_hint(
+    msg: str,
+    snippet: str | None = None,
+    source: str | None = None,
+) -> str | None:
+    """A prescriptive next step for a failure, per SPEC N3.
+
+    *source* is the user's whole submission. A chained CadQuery
+    expression can report a line that does not contain the failing call,
+    so matching on the snippet alone missed e.g. fillet errors.
+    """
     ml = msg.lower()
-    ctx = (ml + " " + (snippet or "").lower()).strip()
-    if "fillet" in ctx and any(
-        w in ctx
-        for w in ("radius", "exceed", "impossible", "failed", "command not done")
-    ):
-        return "Reduce fillet radius or select fewer edges."
-    if "chamfer" in ctx and any(
-        w in ctx for w in ("distance", "exceed", "failed", "command not done")
-    ):
-        return "Reduce chamfer distance — it exceeds the available edge length."
-    if "brep_api" in ml and "command not done" in ml:
+    ctx = " ".join(
+        part.lower()
+        for part in (ml, snippet or "", source or "")
+        if part
+    ).strip()
+
+    # Fillet/chamfer keep their dimension-specific wording.
+    if "fillet" in ctx and any(w in ctx for w in _FILLET_WORDS):
         return (
-            "An OCP kernel operation failed — check fillet/chamfer radii "
-            "and boolean operand sizes."
+            "Reduce the fillet radius or select fewer edges: the radius "
+            "must be smaller than half the shortest adjoining edge."
         )
+    if "chamfer" in ctx and any(w in ctx for w in _CHAMFER_WORDS):
+        return (
+            "Reduce the chamfer distance - it exceeds the available edge "
+            "length."
+        )
+
+    # Hallucinated API, with near-matches from the real Workplane.
+    if "object has no attribute" in ml:
+        bad = msg.split("attribute")[-1].strip().strip("'\"")
+        suggestions = _workplane_suggestions(bad)
+        base = (
+            f"'{bad}' is not a CadQuery method. Check the cadquery_primer "
+            f"prompt or the cad://examples resources for the real name."
+        )
+        return f"{base} Did you mean: {suggestions}?" if suggestions else base
+
+    for needle, hint in _HINTS:
+        if needle in ctx:
+            return hint
+
     if "selector" in ml or "does not exist" in ml:
         return (
-            "Check selector string — the face/edge may not exist "
-            "after prior operations."
+            "Check the selector string - the face or edge may not exist "
+            "after earlier operations. Use measure(what='faces') to see "
+            "how many faces the shape has."
+        )
+    if ml.startswith("takes") or "positional argument" in ml:
+        return (
+            "Wrong number of arguments. Check the method signature in the "
+            "cadquery_primer prompt."
         )
     return None
+
+
+def _context_lines(source: str, line: int, radius: int = 2) -> list[str]:
+    """The failing line plus its neighbours.
+
+    The root cause is often the statement *before* the one that raised —
+    a chain that lost its solid, for instance.
+    """
+    lines = source.splitlines()
+    start = max(0, line - 1 - radius)
+    end = min(len(lines), line + radius)
+    out = []
+    for i in range(start, end):
+        marker = ">>" if i == line - 1 else "  "
+        out.append(f"{marker} {i + 1:3}| {lines[i]}")
+    return out
 
 
 def main() -> None:
@@ -106,7 +252,9 @@ def main() -> None:
             err["line"] = user_line
         if user_text:
             err["snippet"] = user_text
-        hint = _add_hint(str(exc), user_text)
+        if user_line is not None:
+            err["context"] = _context_lines(user_code, user_line)
+        hint = _add_hint(str(exc), user_text, user_code)
         if hint:
             err["hint"] = hint
         emit(err)

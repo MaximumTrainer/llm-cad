@@ -32,6 +32,9 @@ def register(mcp: MCPServer) -> None:
                 "translate": list(part.translate),
                 "rotate": list(part.rotate),
                 "bbox": part.bbox,
+                "source": part.source,
+                "reproducible_from_code": part.source == "cadquery",
+                "ai_prompt": part.ai_prompt,
                 "is_active": name == sess.active_part,
             }
             parts.append(info)

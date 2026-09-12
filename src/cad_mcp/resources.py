@@ -11,6 +11,21 @@ from mcp.server.mcpserver import MCPServer
 from cad_mcp import session
 
 
+def _register_one_example(mcp: MCPServer, name: str) -> None:
+    """Register a single example under its own concrete URI."""
+
+    @mcp.resource(
+        f"cad://examples/{name}",
+        name=f"example_{name}",
+        description=(
+            f"{name}: {EXAMPLE_DESCRIPTIONS.get(name, 'CadQuery example')}"
+        ),
+        mime_type="text/x-python",
+    )
+    def _example() -> str:
+        return EXAMPLES[name]
+
+
 def register(mcp: MCPServer) -> None:
     @mcp.resource(
         "cad://session/current/code",
@@ -29,22 +44,60 @@ def register(mcp: MCPServer) -> None:
             return "# No model code yet. Call execute_cad to start."
         return code
 
+    # An index as a CONCRETE resource. The examples were reachable only
+    # through the template below, and many MCP hosts list concrete
+    # resources but not template expansions — so from the LLM's side they
+    # were invisible unless it already knew a name (CAD-021).
+    @mcp.resource(
+        "cad://examples",
+        name="examples_index",
+        description=(
+            "Index of the curated CadQuery examples, with one line on "
+            "what each demonstrates."
+        ),
+        mime_type="text/markdown",
+    )
+    def examples_index() -> str:
+        lines = [
+            "# cad-mcp examples",
+            "",
+            "Read one with the resource `cad://examples/<name>`.",
+            "",
+        ]
+        for name in sorted(EXAMPLES):
+            lines.append(
+                f"- **{name}** — {EXAMPLE_DESCRIPTIONS.get(name, '')} "
+                f"(`cad://examples/{name}`)"
+            )
+        return "\n".join(lines) + "\n"
+
+    # Each example ALSO registered concretely, so template-blind hosts can
+    # enumerate them.
+    for _name in sorted(EXAMPLES):
+        _register_one_example(mcp, _name)
+
     @mcp.resource(
         "cad://examples/{name}",
         name="example",
         description=(
-            "Curated CadQuery example models. Available: bracket, "
-            "enclosure, flange, pipe_clamp, phone_stand, "
-            "threaded_cap, gear, desk_organizer"
+            "Curated CadQuery example models. Available: "
+            + ", ".join(sorted(EXAMPLES))
         ),
         mime_type="text/x-python",
     )
     def example(name: str) -> str:
         if name not in EXAMPLES:
-            available = ", ".join(sorted(EXAMPLES))
-            return (
-                f"# Unknown example '{name}'.\n"
-                f"# Available examples: {available}\n"
+            # A Python comment is not an error: the LLM cannot tell it
+            # apart from a working example (CAD-021).
+            from cad_mcp.envelope import fail
+
+            return fail(
+                "UnknownExample",
+                f"There is no example named '{name}'.",
+                hint=(
+                    f"Available: {', '.join(sorted(EXAMPLES))}. "
+                    f"Read cad://examples for a description of each."
+                ),
             )
         return EXAMPLES[name]
 
@@ -346,3 +399,28 @@ card_inner = (
 
 result = base.union(pen_box).union(card_slot).cut(card_inner)
 '''
+
+
+# One line per example, used to generate both the index and each
+# example's own resource description. Previously the list of names lived
+# in a hand-maintained string that could drift from EXAMPLES (CAD-021).
+EXAMPLE_DESCRIPTIONS: dict[str, str] = {
+    "bracket": (
+        "wall-mount bracket for a 30mm pipe; shows plates, hole "
+        "patterns and a half-cylinder cradle"
+    ),
+    "enclosure": (
+        "two-part box and lid; shows shell(), a lip for the lid and "
+        "screw bosses"
+    ),
+    "flange": "bolted pipe flange; shows polarArray hole patterns",
+    "pipe_clamp": "two-piece clamp; shows a split body and mating faces",
+    "phone_stand": (
+        "angled stand; shows transformed workplanes and a cable slot"
+    ),
+    "threaded_cap": "screw cap; shows a helical thread via sweep",
+    "gear": "involute spur gear; shows a parametric tooth profile",
+    "desk_organizer": (
+        "multi-compartment tray; shows repeated pockets and fillets"
+    ),
+}

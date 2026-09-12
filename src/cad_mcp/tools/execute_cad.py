@@ -94,6 +94,7 @@ def register(mcp: MCPServer) -> None:
                     line=result.line,
                     snippet=result.snippet,
                     hint=result.hint,
+                    context=result.context,
                 )
             return ok(
                 result.format_for_llm(),

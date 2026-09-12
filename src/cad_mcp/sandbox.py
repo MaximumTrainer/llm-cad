@@ -41,6 +41,7 @@ class SandboxResult:
     line: int | None = None
     snippet: str | None = None
     hint: str | None = None
+    context: list[str] | None = None
     solid_count: int | None = None
     bbox: dict[str, float] | None = field(default=None)
 
@@ -52,6 +53,7 @@ class SandboxResult:
             "line",
             "snippet",
             "hint",
+            "context",
             "solid_count",
             "bbox",
         ):
@@ -311,6 +313,7 @@ def run(
         line=data.get("line"),
         snippet=data.get("snippet"),
         hint=data.get("hint"),
+        context=data.get("context"),
         solid_count=data.get("solid_count"),
         bbox=data.get("bbox"),
     )

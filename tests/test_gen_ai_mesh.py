@@ -5,6 +5,7 @@ and are gated behind a pytest marker.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -168,6 +169,9 @@ class TestMeshyClient:
             )
         assert exc_info.value.status == 429
         assert "rate limited" in exc_info.value.hint.lower()
+        # create_preview POSTs, which is not retried: a duplicate
+        # generation would cost credits twice.
+        assert mock_client.post.await_count == 1
 
     @pytest.mark.anyio
     async def test_api_error_4xx(self) -> None:
@@ -256,9 +260,17 @@ class TestGenAiMeshTool:
         brep = sess.brep_path()
         assert brep.exists()
 
-        # Code history should record the gen_ai_mesh call
+        # Provenance, not a synthetic code-history entry. Recording a
+        # comment in the history meant a later execute_cad(append)
+        # replayed a comment plus new code and silently destroyed the
+        # mesh (CAD-022).
         part = sess.get_active_part()
-        assert any("gen_ai_mesh" in h for h in part.code_history)
+        assert part.source == "ai_mesh"
+        assert part.ai_prompt
+        assert part.ai_glb_path
+        assert part.code_history == []
+        assert part.bbox is not None
+        assert data["reproducible_from_code"] is False
 
     @pytest.mark.anyio
     async def test_timeout_returns_error(self) -> None:
@@ -452,12 +464,25 @@ class TestGenAiMeshTool:
 # ------------------------------------------------------------------
 
 
-def _mock_response(status: int, body: dict[str, Any]) -> Any:
-    """Create a mock httpx.Response."""
+def _mock_response(
+    status: int,
+    body: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> Any:
+    """Create a mock httpx.Response.
+
+    A real `httpx.Response` always has `headers`, and the client reads
+    `Retry-After` from them, so the fake carries them too.
+    """
+
+    # Bound outside the class body: a class attribute named `headers`
+    # cannot read the enclosing function's `headers` parameter.
+    header_map = dict(headers or {})
 
     class FakeResponse:
         status_code = status
         text = json.dumps(body)
+        headers = header_map
 
         def json(self) -> dict[str, Any]:
             return body
@@ -468,3 +493,293 @@ def _mock_response(status: int, body: dict[str, Any]) -> Any:
                 raise Exception(msg)
 
     return FakeResponse()
+
+
+# ------------------------------------------------------------------
+# CAD-027: download cap, host allowlist, monotonic clock, retry
+# ------------------------------------------------------------------
+
+
+def _streaming_client(chunks: list[bytes], headers: dict[str, str]) -> Any:
+    """An AsyncMock client whose `.stream()` yields *chunks*."""
+
+    header_map = dict(headers)
+
+    class FakeStream:
+        status_code = 200
+        headers = header_map
+
+        async def aiter_bytes(self, chunk_size: int = 0) -> Any:
+            for chunk in chunks:
+                yield chunk
+
+    class Ctx:
+        async def __aenter__(self) -> Any:
+            return FakeStream()
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    client = AsyncMock()
+    client.stream = lambda *a, **kw: Ctx()
+    return client
+
+
+class TestDownloadSafety:
+    @pytest.mark.anyio
+    async def test_download_rejects_an_unexpected_host(
+        self, tmp_path: Path
+    ) -> None:
+        """follow_redirects on an API-supplied URL is a fetch primitive."""
+        from cad_mcp import meshy
+
+        with pytest.raises(MeshyError) as exc:
+            await meshy.download_glb(
+                AsyncMock(),
+                "https://evil.example.com/x.glb",
+                tmp_path / "x.glb",
+            )
+        assert "unexpected host" in str(exc.value)
+        assert not (tmp_path / "x.glb").exists()
+
+    def test_download_accepts_meshy_and_its_cdn(self) -> None:
+        from cad_mcp import meshy
+
+        for url in (
+            "https://assets.meshy.ai/x/model.glb",
+            "https://meshy.ai/model.glb",
+            "https://bucket.s3.amazonaws.com/model.glb",
+            "https://d1.cloudfront.net/model.glb",
+        ):
+            meshy._check_download_host(url)
+
+    @pytest.mark.anyio
+    async def test_download_refuses_an_oversized_declared_length(
+        self, tmp_path: Path
+    ) -> None:
+        from cad_mcp import meshy
+
+        client = _streaming_client(
+            chunks=[b"x" * 10],
+            headers={"content-length": str(999 * 1024 * 1024)},
+        )
+        with pytest.raises(MeshyError) as exc:
+            await meshy.download_glb(
+                client,
+                "https://assets.meshy.ai/big.glb",
+                tmp_path / "big.glb",
+                max_bytes=1024,
+            )
+        assert "limit" in str(exc.value)
+
+    @pytest.mark.anyio
+    async def test_download_stops_mid_stream_at_the_cap(
+        self, tmp_path: Path
+    ) -> None:
+        """A content-length that understates the body must not get past."""
+        from cad_mcp import meshy
+
+        client = _streaming_client(chunks=[b"x" * 512] * 10, headers={})
+        dest = tmp_path / "big.glb"
+        with pytest.raises(MeshyError) as exc:
+            await meshy.download_glb(
+                client,
+                "https://assets.meshy.ai/big.glb",
+                dest,
+                max_bytes=1024,
+            )
+        assert "exceeded" in str(exc.value)
+        assert not dest.exists(), "a partial download was left behind"
+
+    @pytest.mark.anyio
+    async def test_download_writes_a_small_file(
+        self, tmp_path: Path
+    ) -> None:
+        from cad_mcp import meshy
+
+        client = _streaming_client(chunks=[b"glb-bytes"], headers={})
+        dest = await meshy.download_glb(
+            client, "https://assets.meshy.ai/ok.glb", tmp_path / "ok.glb"
+        )
+        assert dest.read_bytes() == b"glb-bytes"
+
+    @pytest.mark.anyio
+    async def test_empty_download_is_an_error(self, tmp_path: Path) -> None:
+        from cad_mcp import meshy
+
+        client = _streaming_client(chunks=[], headers={})
+        with pytest.raises(MeshyError) as exc:
+            await meshy.download_glb(
+                client, "https://assets.meshy.ai/e.glb", tmp_path / "e.glb"
+            )
+        assert "empty" in str(exc.value)
+
+
+class TestPollingBudget:
+    @pytest.mark.anyio
+    async def test_timeout_is_measured_against_a_monotonic_clock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slow responses used to extend the budget indefinitely.
+
+        The old loop added only the sleep interval to `elapsed`, so a
+        request that took 30 seconds counted as 3 seconds of the 120
+        second budget.
+        """
+        from cad_mcp import meshy
+
+        client = AsyncMock()
+        client.get = AsyncMock(
+            return_value=_mock_response(200, {"status": "PENDING"})
+        )
+
+        clock = {"t": 0.0}
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(seconds: float) -> None:
+            clock["t"] += 30.0
+            await real_sleep(0)
+
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(
+            type(loop), "time", lambda _self: clock["t"], raising=False
+        )
+
+        with pytest.raises(MeshyTimeout):
+            await meshy.poll_until_done(client, "key", "task-1", 10.0)
+
+        assert client.get.await_count <= 2, (
+            f"polled {client.get.await_count} times on a 10 second budget"
+        )
+
+
+class TestRetry:
+    @pytest.mark.anyio
+    async def test_transient_5xx_is_retried_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cad_mcp import meshy
+
+        monkeypatch.setattr(meshy, "RETRY_BASE_DELAY_S", 0.0)
+        client = AsyncMock()
+        client.get = AsyncMock(
+            side_effect=[
+                _mock_response(503, {"message": "unavailable"}),
+                _mock_response(200, {"status": "SUCCEEDED"}),
+            ]
+        )
+
+        resp = await meshy._get_with_retry(client, "https://x/y", {})
+        assert resp.status_code == 200
+        assert client.get.await_count == 2
+
+    @pytest.mark.anyio
+    async def test_4xx_is_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 400 will not become a 200; retrying only wastes time."""
+        from cad_mcp import meshy
+
+        monkeypatch.setattr(meshy, "RETRY_BASE_DELAY_S", 0.0)
+        client = AsyncMock()
+        client.get = AsyncMock(
+            return_value=_mock_response(400, {"message": "bad prompt"})
+        )
+
+        resp = await meshy._get_with_retry(client, "https://x/y", {})
+        assert resp.status_code == 400
+        assert client.get.await_count == 1
+
+    @pytest.mark.anyio
+    async def test_retry_gives_up_with_a_structured_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx
+
+        from cad_mcp import meshy
+
+        monkeypatch.setattr(meshy, "RETRY_BASE_DELAY_S", 0.0)
+        client = AsyncMock()
+        client.get = AsyncMock(side_effect=httpx.ConnectError("down"))
+
+        with pytest.raises(MeshyError) as exc:
+            await meshy._get_with_retry(client, "https://x/y", {})
+        assert "after 3 attempts" in str(exc.value)
+
+    @pytest.mark.anyio
+    async def test_429_hint_mentions_retry_after(self) -> None:
+        from cad_mcp import meshy
+
+        client = AsyncMock()
+        client.post = AsyncMock(
+            return_value=_mock_response(
+                429, {"message": "slow down"}, {"retry-after": "12"}
+            )
+        )
+        with pytest.raises(MeshyError) as exc:
+            await meshy.create_preview(client, "key", prompt="a cube")
+        assert "12" in exc.value.hint
+
+
+# ------------------------------------------------------------------
+# CAD-028: mesh import is bounded
+# ------------------------------------------------------------------
+
+
+class TestSewBudget:
+    @pytest.mark.anyio
+    async def test_target_polycount_range_is_enforced(self) -> None:
+        """The docstring said 100-15000; the code never checked."""
+        for bad in (1, 99, 15001, 500_000):
+            payload = flat(
+                await mcp.call_tool(
+                    "gen_ai_mesh",
+                    {"prompt": "a pawn", "target_polycount": bad},
+                )
+            )
+            assert payload["ok"] is False, f"{bad} was accepted"
+            assert payload["error_type"] == "ValueError"
+
+    @pytest.mark.anyio
+    async def test_art_style_and_topology_are_validated(self) -> None:
+        for args in (
+            {"prompt": "x", "art_style": "cubist"},
+            {"prompt": "x", "topology": "hexagon"},
+        ):
+            payload = flat(await mcp.call_tool("gen_ai_mesh", args))
+            assert payload["ok"] is False
+            assert payload["error_type"] == "ValueError"
+
+    def test_dense_mesh_is_simplified_before_sewing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sewing is one OCP face per triangle in a Python loop."""
+        import trimesh
+
+        from cad_mcp import mesh_to_brep
+
+        monkeypatch.setattr(mesh_to_brep, "MAX_SEW_TRIANGLES", 200)
+
+        dense = trimesh.creation.icosphere(subdivisions=4)
+        assert len(dense.faces) > 200
+        glb = tmp_path / "dense.glb"
+        dense.export(str(glb))
+
+        stats = mesh_to_brep.glb_to_brep(glb, tmp_path / "dense.brep")
+
+        assert stats["simplified"] is True
+        assert stats["face_count"] <= 200
+        assert stats["original_face_count"] > 200
+
+    def test_small_mesh_is_not_simplified(self, tmp_path: Path) -> None:
+        import trimesh
+
+        from cad_mcp import mesh_to_brep
+
+        glb = tmp_path / "cube.glb"
+        trimesh.creation.box(extents=(2, 2, 2)).export(str(glb))
+        stats = mesh_to_brep.glb_to_brep(glb, tmp_path / "cube.brep")
+
+        assert stats["simplified"] is False
+        assert stats["face_count"] == stats["original_face_count"]

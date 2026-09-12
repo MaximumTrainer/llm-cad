@@ -40,7 +40,9 @@ import json
 from typing import Any
 
 SCHEMA_KEYS = frozenset({"ok", "summary", "data", "error"})
-ERROR_KEYS = frozenset({"type", "message", "line", "snippet", "hint"})
+ERROR_KEYS = frozenset(
+    {"type", "message", "line", "snippet", "hint", "context"}
+)
 
 
 def ok(summary: str, **data: Any) -> str:
@@ -66,6 +68,7 @@ def fail(
     line: int | None = None,
     snippet: str | None = None,
     hint: str | None = None,
+    context: list[str] | None = None,
     **data: Any,
 ) -> str:
     """A failed tool response, in SPEC N3 shape: what, where, and a hint."""
@@ -76,6 +79,8 @@ def fail(
         error["snippet"] = snippet
     if hint:
         error["hint"] = hint
+    if context:
+        error["context"] = context
 
     summary = f"{error_type}: {message}"
     if line is not None:
