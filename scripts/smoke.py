@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -88,6 +89,10 @@ async def main() -> None:
 
     # ── Step 5: export_model (STL + STEP) ────────────────────────
     print("\nStep 5: export_model")
+    # Keep the paths the tool actually returned. Reconstructing them from
+    # the session tmpdir broke silently the moment exports moved to the
+    # durable output dir (CAD-023) — the pre-push hook caught it.
+    exported: dict[str, Path] = {}
     for fmt in ("stl", "step"):
         result = await mcp.call_tool(
             "export_model", {"format": fmt, "filename": "bracket"}
@@ -98,6 +103,7 @@ async def main() -> None:
         p = Path(exp["path"])
         if not p.exists():
             _fail(f"exported file missing: {p}")
+        exported[fmt] = p
         _ok(f"{fmt.upper()}: {p.name} ({exp['size_bytes']} bytes)")
 
     # ── Step 6: verify STL determinism ───────────────────────────
@@ -129,8 +135,7 @@ async def main() -> None:
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.STEPControl import STEPControl_Reader
 
-    sess = session.get_or_create()
-    step_path = sess.tmpdir / "output" / "bracket.step"
+    step_path = exported["step"]
     reader = STEPControl_Reader()
     status = reader.ReadFile(str(step_path))
     if status != IFSelect_RetDone:
@@ -146,5 +151,36 @@ async def main() -> None:
     session.cleanup_all()
 
 
+def _run() -> None:
+    """Run the loop, then exit without native static destructors.
+
+    OCP/VTK segfault on interpreter teardown, which turned a fully
+    successful smoke run into a non-zero exit (see issue #10). Flush and
+    hard-exit so the status means what it says.
+    """
+    # Exports are durable by design (CAD-023), but a smoke run should not
+    # litter the working tree or accumulate bracket-1..bracket-N.
+    if not os.environ.get("CAD_MCP_OUTPUT_DIR"):
+        import tempfile
+
+        os.environ["CAD_MCP_OUTPUT_DIR"] = tempfile.mkdtemp(
+            prefix="cad-mcp-smoke-"
+        )
+
+    code = 0
+    try:
+        asyncio.run(main())
+    except SystemExit as exc:
+        code = int(exc.code or 0)
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        code = 1
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    _run()
