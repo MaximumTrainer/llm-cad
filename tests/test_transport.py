@@ -238,23 +238,61 @@ class TestHTTPIntegration:
         proc.terminate()
         proc.wait(timeout=5)
 
-    def test_health_endpoint(
+    def test_health_reports_ready_once_the_kernel_is_up(
         self, server_proc: subprocess.Popen[bytes], free_port: int
     ) -> None:
-        import urllib.request
+        """SPEC H7: 200 means the kernel can actually run geometry.
 
-        resp = urllib.request.urlopen(f"http://127.0.0.1:{free_port}/health")
-        assert resp.status == 200
-        body = json.loads(resp.read())
-        assert body == {"status": "ok"}
+        The port opens ~3.3s before that is true, so this polls rather
+        than asserting on the first answer -- which is precisely the
+        distinction the endpoint exists to make.
+        """
+        body = _await_health(free_port)
+
+        assert body["status"] == "ok"
+        assert body["kernel"] in ("ready", "in-process")
+        assert body["render_backend"] in ("pyrender", "matplotlib")
+        assert body["version"]
+
+    def test_health_before_the_kernel_is_up_is_503_not_a_lie(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A machine that answers 200 too early gets routed traffic it
+        cannot serve.
+
+        A pool with no worker started *is* that moment, so it is
+        substituted for the process-wide one rather than waited for: by
+        the time the suite reaches here the real pool has long since
+        warmed, and a test that depends on running first is not a test.
+        """
+        from cad_mcp import geometry
+        from cad_mcp import server as server_mod
+
+        if not geometry.isolated():
+            pytest.skip("geometry isolation disabled; nothing to wait for")
+        monkeypatch.setattr(geometry, "POOL", geometry.GeometryWorker())
+
+        payload = server_mod.health_payload()
+
+        assert payload["status_code"] == 503
+        assert payload["content"]["status"] == "starting"
+        assert payload["content"]["kernel"] == "starting"
 
     def test_health_no_auth_required(
         self, auth_server_proc: subprocess.Popen[bytes], free_port: int
     ) -> None:
+        """Auth on /health would stop a platform health check dead."""
         import urllib.request
 
-        resp = urllib.request.urlopen(f"http://127.0.0.1:{free_port}/health")
-        assert resp.status == 200
+        # Not _await_health: the point here is that the request is not
+        # refused, whatever the readiness answer is.
+        try:
+            status = urllib.request.urlopen(
+                f"http://127.0.0.1:{free_port}/health"
+            ).status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        assert status in (200, 503), "health must not require a token"
 
     def test_mcp_endpoint_returns_401_without_token(
         self, auth_server_proc: subprocess.Popen[bytes], free_port: int
@@ -290,6 +328,33 @@ class TestStdioStillWorks:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _await_health(port: int, timeout: float = 90) -> dict[str, object]:
+    """Poll `/health` until it reports ready, and return the body.
+
+    Generous, because what it is waiting for is a CadQuery import in a
+    freshly spawned worker while the rest of the suite competes for the
+    same CPU.
+    """
+    import urllib.error
+    import urllib.request
+
+    deadline = time.monotonic() + timeout
+    last: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        try:
+            resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/health")
+            return dict(json.loads(resp.read()))
+        except urllib.error.HTTPError as exc:
+            if exc.code != 503:
+                raise
+            last = dict(json.loads(exc.read()))
+        except OSError:
+            pass
+        time.sleep(0.5)
+    msg = f"/health never reported ready within {timeout}s; last body: {last}"
+    raise TimeoutError(msg)
 
 
 def _wait_for_port(port: int, timeout: float = 10) -> None:

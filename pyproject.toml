@@ -35,7 +35,14 @@ dependencies = [
     "uvicorn>=0.30",
     # transport.py imports AnyHttpUrl directly.
     "pydantic>=2.7",
+    # trimesh's 3MF exporter needs both of these and declares neither as a
+    # hard dependency, so a runtime-only install silently loses a format
+    # SPEC G4 advertises: lxml to write the model XML, networkx to walk
+    # the scene graph. Both were missing from the container while the dev
+    # venv happened to have them, which is exactly the CAD-012 failure
+    # mode repeating one layer out.
     "lxml>=6.1.3",
+    "networkx>=3.0",
 ]
 
 [project.optional-dependencies]

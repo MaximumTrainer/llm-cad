@@ -1,0 +1,69 @@
+# cad-mcp on Fly.io (SPEC 10.4). See docs/deploy.md.
+#
+# Fly rather than an edge runtime because this server needs ordinary
+# Linux semantics -- subprocesses, setrlimit, a writable local filesystem
+# and a GL stack -- and because `fly-replay` solves MCP's session
+# affinity without a front-door service of our own.
+
+app = "cad-mcp"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  CAD_MCP_TRANSPORT = "http"
+  CAD_MCP_HOST = "0.0.0.0"
+  CAD_MCP_PORT = "8000"
+  # The bind address above is a wildcard, not a reachable URL. Without
+  # this, OAuth protected-resource metadata would advertise
+  # `http://0.0.0.0:8000/mcp`, which no client can dereference.
+  CAD_MCP_PUBLIC_URL = "https://cad-mcp.fly.dev"
+  # DNS-rebinding protection is deny-by-default off loopback, so the
+  # hostnames clients actually send must be listed or every request is
+  # rejected (SPEC 10.1 H6).
+  CAD_MCP_ALLOWED_HOSTS = "cad-mcp.fly.dev"
+  PYOPENGL_PLATFORM = "egl"
+
+# CAD_MCP_AUTH_TOKEN and MESHY_API_KEY are secrets:
+#   fly secrets set CAD_MCP_AUTH_TOKEN=... MESHY_API_KEY=...
+# Setting a secret triggers a rolling restart, which ends live sessions.
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_start_machines = true
+  # "suspend" snapshots RAM, so a resumed machine already has cadquery
+  # imported -- the single biggest lever on cold start, which is
+  # otherwise ~3.3s of import before the first execute_cad. It also makes
+  # mid-session machine stops far less likely to destroy a session's
+  # .brep cache. Falls back to a full stop where suspend is unavailable
+  # for the machine size; confirm which is in effect with `fly status`.
+  auto_stop_machines = "suspend"
+  min_machines_running = 0
+  # Affinity is handled inside the app via fly-replay (see fly.py), so
+  # concurrency here is about load, not routing.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 4
+    hard_limit = 8
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    # The kernel import is ~3.3s and the server pre-warms a sandbox
+    # worker before binding, so a new machine needs slack before its
+    # first check.
+    grace_period = "90s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  # sandbox.py caps a single execution at 2GiB RSS by default and OCCT is
+  # memory-hungry, so 2GiB total would leave the server itself nothing.
+  size = "shared-cpu-2x"
+  memory = "4gb"
+
+[[restart]]
+  policy = "on-failure"
+  retries = 3

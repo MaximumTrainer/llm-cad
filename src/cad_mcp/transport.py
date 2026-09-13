@@ -28,6 +28,11 @@ class TransportConfig:
     cors_origin: str | None = None
     allowed_hosts: list[str] = field(default_factory=list)
     stateless: bool = False
+    # The URL clients actually reach this server on. Distinct from
+    # host/port, which are the *bind* address: behind a proxy or on a
+    # PaaS those are `0.0.0.0:8000`, which is a wildcard rather than a
+    # reachable address and is useless in OAuth metadata.
+    public_url: str | None = None
 
     def run_kwargs(self) -> dict[str, Any]:
         """Build kwargs for ``MCPServer.run()``."""
@@ -75,6 +80,14 @@ class TransportConfig:
                 f"DNS-rebinding protection. Set CAD_MCP_ALLOWED_HOSTS to the "
                 f"hostnames clients will use."
             )
+        if not self.is_loopback() and not self.public_url:
+            out.append(
+                f"Binding non-loopback host {self.host!r} with no "
+                f"CAD_MCP_PUBLIC_URL: OAuth metadata will advertise the bind "
+                f"address {self.base_url()!r} rather than the URL clients "
+                f"reach. Set CAD_MCP_PUBLIC_URL to the externally visible "
+                f"origin, e.g. https://cad-mcp.example.com."
+            )
         if not self.is_loopback() and not self.auth_token:
             out.append(
                 f"Binding non-loopback host {self.host!r} with no "
@@ -83,15 +96,29 @@ class TransportConfig:
             )
         return out
 
+    def base_url(self) -> str:
+        """The URL a client uses to reach this server, without a trailing slash.
+
+        ``CAD_MCP_PUBLIC_URL`` wins when set. Falling back to the bind
+        address is right for a laptop and wrong for any real deployment:
+        a server bound to `0.0.0.0` would otherwise publish
+        `http://0.0.0.0:8000/mcp` as its OAuth protected-resource URL,
+        which no client can dereference and which is not the https origin
+        the client actually used.
+        """
+        if self.public_url:
+            return self.public_url.rstrip("/")
+        return f"http://{self.host}:{self.port}"
+
     def auth_settings(self) -> tuple[BearerTokenVerifier, AuthSettings] | None:
         """Build SDK auth objects if ``auth_token`` is set."""
         if not self.auth_token:
             return None
-        resource_url = f"http://{self.host}:{self.port}/mcp"
+        base = self.base_url()
         verifier = BearerTokenVerifier(self.auth_token)
         settings = AuthSettings(
-            issuer_url=AnyHttpUrl(f"http://{self.host}:{self.port}"),
-            resource_server_url=AnyHttpUrl(resource_url),
+            issuer_url=AnyHttpUrl(base),
+            resource_server_url=AnyHttpUrl(f"{base}/mcp"),
             required_scopes=["cad"],
         )
         return verifier, settings
@@ -152,4 +179,5 @@ def parse_args(argv: list[str] | None = None) -> TransportConfig:
         cors_origin=os.environ.get("CAD_MCP_CORS_ORIGIN"),
         allowed_hosts=allowed_hosts,
         stateless=os.environ.get("CAD_MCP_STATELESS", "") == "1",
+        public_url=os.environ.get("CAD_MCP_PUBLIC_URL", "").strip() or None,
     )

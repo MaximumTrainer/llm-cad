@@ -150,6 +150,18 @@ class GeometryWorker:
             with _suppress_os_error():
                 worker.proc.kill()
 
+    def is_ready(self) -> bool:
+        """Whether a live worker is standing by, without starting one.
+
+        Readiness is not liveness: the process answers HTTP about 3.3s
+        before it can run geometry, because that is what importing
+        CadQuery costs. `/health` needs to tell those apart (SPEC H7), so
+        this must never block and must never spawn — a health check that
+        starts the thing it is checking always reports success.
+        """
+        worker = self._worker
+        return worker is not None and worker.proc.poll() is None
+
     def prewarm(self) -> None:
         """Start the worker off the critical path, like the sandbox does."""
         if not isolated():

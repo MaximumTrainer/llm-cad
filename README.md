@@ -89,9 +89,26 @@ CAD_MCP_TRANSPORT=http uv run cad-mcp
 | `CAD_MCP_AUTH_TOKEN` | (none) | Bearer token for auth (unset = no auth) |
 | `CAD_MCP_CORS_ORIGIN` | (none) | Allowed CORS origin (e.g. `https://app.example.com`) |
 | `CAD_MCP_ALLOWED_HOSTS` | (none) | Comma-separated allowed hostnames |
-| `CAD_MCP_STATELESS` | `0` | `1` for stateless HTTP mode |
+| `CAD_MCP_PUBLIC_URL` | (none) | Externally reachable origin, e.g. `https://cad-mcp.example.com`. Required off loopback: the bind address is not a URL clients can use, and OAuth metadata would otherwise advertise `http://0.0.0.0:8000/mcp`. |
+| `CAD_MCP_STATELESS` | `0` | `1` for stateless HTTP mode. **Not** a way to avoid session affinity — it breaks the core loop, because `render_views` reads state `execute_cad` wrote. |
 
-**Health check:** `GET /health` returns `{"status": "ok"}` (no auth required).
+**Health check:** `GET /health` (no auth required) reports *readiness*, not liveness. It answers `503 {"status": "starting", ...}` for the ~3s the geometry kernel takes to import CadQuery, then `200 {"status": "ok", "kernel": "ready", "render_backend": "matplotlib", "version": "0.1.0"}`. Point a load balancer at it and no client reaches a machine that cannot yet run geometry; `render_backend` tells you which of the two backends N5 allows you actually got.
+
+### Running it as a hosted server
+
+There is a `Dockerfile` and a `fly.toml`, plus a deploy workflow and a
+smoke test that drives the full core loop over the wire:
+
+```bash
+docker build -t cad-mcp .
+docker run --rm -p 8000:8000 -e CAD_MCP_AUTH_TOKEN=dev-token   -e CAD_MCP_PUBLIC_URL=http://127.0.0.1:8000   -e CAD_MCP_ALLOWED_HOSTS=127.0.0.1:8000,localhost:8000 cad-mcp
+
+uv run python scripts/smoke_remote.py   --url http://127.0.0.1:8000 --token dev-token --repeat 10
+```
+
+See **[docs/deploy.md](docs/deploy.md)** for session affinity, secrets,
+sizing, cold start, rollback and cost. SPEC §10.4 states what is
+guaranteed.
 
 **Auth:** When `CAD_MCP_AUTH_TOKEN` is set, all MCP requests require `Authorization: Bearer <token>`. Requests without a valid token receive HTTP 401.
 

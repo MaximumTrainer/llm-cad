@@ -31,7 +31,28 @@ _WORKER = Path(__file__).with_name("_sandbox_worker.py")
 DEFAULT_TIMEOUT_S = int(os.environ.get("CAD_MCP_SANDBOX_TIMEOUT_S") or 30)
 DEFAULT_MEMORY_MB = int(os.environ.get("CAD_MCP_SANDBOX_MEM_MB") or 2048)
 DEFAULT_MAX_FILE_MB = int(os.environ.get("CAD_MCP_SANDBOX_FILE_MB") or 512)
-DEFAULT_MAX_PROCS = int(os.environ.get("CAD_MCP_SANDBOX_MAX_PROCS") or 64)
+def _default_max_procs() -> int:
+    """A fork-bomb brake that scales with the machine.
+
+    `RLIMIT_NPROC` on Linux is per *real UID* and counts **threads**, not
+    just processes, so it is a much blunter instrument than its name
+    suggests. The old flat 64 was below what a legitimate CadQuery import
+    needs: NumPy/OpenBLAS and OCCT each start a pool sized from the CPU
+    count, and in a container on a 12-core host the worker died during
+    `import numpy` with rc=-2 before it ran a line of user code. Measured
+    there: 64 fails, 128 and above succeed.
+
+    So it scales with the CPU count and keeps real headroom. It is still
+    a brake -- it stops runaway spawning long before it can exhaust the
+    host -- but the per-execution guarantees that actually matter are the
+    wall-clock timeout, the memory cap and the process-group kill.
+    """
+    return max(256, (os.cpu_count() or 4) * 32)
+
+
+DEFAULT_MAX_PROCS = int(
+    os.environ.get("CAD_MCP_SANDBOX_MAX_PROCS") or _default_max_procs()
+)
 
 _IS_WINDOWS = sys.platform == "win32"
 

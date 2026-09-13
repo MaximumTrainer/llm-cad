@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
+from importlib.metadata import version
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -52,9 +54,49 @@ def create_server(**kwargs: Any) -> MCPServer:
 
     @server.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator]
     async def health(request: Request) -> JSONResponse:
-        return JSONResponse({"status": "ok"})
+        return JSONResponse(**health_payload())
 
     return server
+
+
+def health_payload() -> dict[str, Any]:
+    """Body and status code for `GET /health` (SPEC H7).
+
+    Readiness, not liveness. The process accepts connections roughly
+    3.3s before it can run any geometry, because that is the cost of
+    importing CadQuery in the kernel worker. A platform health check that
+    cannot tell those apart happily routes a client's first
+    `execute_cad` to a machine with no kernel behind it, so this answers
+    503 until the worker is up.
+
+    It also names the render backend, because N5 permits two of them and
+    §10.4 requires a deployment to state which one it got rather than
+    assume. `known_backend` never probes: settling the question here
+    would mean building an EGL context on the event loop.
+    """
+    from cad_mcp import geometry, render
+
+    if not geometry.isolated():
+        # Nothing to wait for: OCP is in this process, so if this handler
+        # is running at all the kernel is loaded.
+        kernel = "in-process"
+        ready = True
+    elif geometry.POOL.is_ready():
+        kernel = "ready"
+        ready = True
+    else:
+        kernel = "starting"
+        ready = False
+
+    return {
+        "content": {
+            "status": "ok" if ready else "starting",
+            "kernel": kernel,
+            "render_backend": render.known_backend() or "unknown",
+            "version": version("cad-mcp"),
+        },
+        "status_code": 200 if ready else 503,
+    }
 
 
 # Default instance for tests and smoke script (no auth, stdio)
@@ -66,13 +108,18 @@ def main() -> None:
 
     # Start a spare sandbox worker so the first execute_cad does not pay
     # the ~3.3s CadQuery import on the critical path (CAD-014).
-    from cad_mcp import geometry, sandbox
+    from cad_mcp import geometry, render, sandbox
 
     sandbox.prewarm()
     # And the geometry kernel, for the same reason: the first render
     # would otherwise pay that import again on the other side of the
     # isolation boundary (issue #10).
     geometry.POOL.prewarm()
+    # Settle which render backend this host actually has while nothing is
+    # waiting on the answer. It builds a throwaway EGL context, which is
+    # not something `/health` should do on the event loop, and `/health`
+    # has to report it (SPEC H7, §10.4 A8).
+    threading.Thread(target=render.active_backend, daemon=True).start()
 
     from cad_mcp.transport import parse_args
 

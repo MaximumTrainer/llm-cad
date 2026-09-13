@@ -46,7 +46,7 @@ LLMs are bad at emitting mesh data directly but excellent at writing code. This 
 
 ## 6. Non-functional requirements
 - N1 Sandbox: model code runs in a subprocess under two layers of containment.
-  - **OS-enforced (hard guarantees).** Wall-clock timeout (30s default, `CAD_MCP_SANDBOX_TIMEOUT_S`); address-space/memory cap (2GB default, `CAD_MCP_SANDBOX_MEM_MB`) via `RLIMIT_AS`/`RLIMIT_DATA` on Unix and a Job Object with `JOB_OBJECT_LIMIT_PROCESS_MEMORY` on Windows; file-size cap (`RLIMIT_FSIZE`); process-count cap (`RLIMIT_NPROC` / `ActiveProcessLimit`); and a process-group/job kill on timeout so nothing is orphaned.
+  - **OS-enforced (hard guarantees).** Wall-clock timeout (30s default, `CAD_MCP_SANDBOX_TIMEOUT_S`); address-space/memory cap (2GB default, `CAD_MCP_SANDBOX_MEM_MB`) via `RLIMIT_AS`/`RLIMIT_DATA` on Unix and a Job Object with `JOB_OBJECT_LIMIT_PROCESS_MEMORY` on Windows; file-size cap (`RLIMIT_FSIZE`); and a process-group/job kill on timeout so nothing is orphaned. A process-count brake is also set (`RLIMIT_NPROC` / `ActiveProcessLimit`, `CAD_MCP_SANDBOX_MAX_PROCS`), but it is deliberately generous and is **not** a precise per-execution cap: on Linux `RLIMIT_NPROC` is per real UID and counts threads, and NumPy/OpenBLAS and OCCT each start a pool sized from the CPU count. It scales with `os.cpu_count()` and defaults to at least 256; a flat 64 killed the worker during `import numpy` before any user code ran. Treat it as a runaway-spawn brake — the hard per-execution guarantees are the timeout, the memory cap and the process-group kill.
   - **In-process (defence in depth).** Filesystem writes confined to the session temp dir and reads to that dir plus the Python installation; all socket implementations neutralised including the `_socket` C accelerator; process creation blocked (`fork`, `spawn*`, `exec*`, `system`, `popen`); and an import policy enforced both by a `builtins.__import__` hook and a `sys.meta_path` finder, so `importlib.import_module` cannot route around it.
   - **Threat model.** The in-process layer runs in the same interpreter as user code and is therefore a barrier against accidents and casual misuse, **not** a jail for deliberately hostile code. Do not expose this server to untrusted prompts without OS-level isolation (a container, seccomp/bwrap, or a Windows restricted token) around the whole process.
 - N2 Latency: execute ≤5s typical, render ≤2s, validate ≤5s for meshes under 500k tris.
@@ -144,11 +144,11 @@ Requirements:
 - H4: Session isolation: each HTTP MCP session gets its own `Session` (tmpdir, code history). Session cleanup on disconnect via `session_idle_timeout` (default 300s).
 - H5: CORS headers when `CAD_MCP_CORS_ORIGIN` is set (for browser-based MCP clients). Expose `Mcp-Session-Id` header.
 - H6: `TransportSecuritySettings(allowed_hosts=...)` derived from `CAD_MCP_HOST` and `CAD_MCP_ALLOWED_HOSTS` (comma-separated).
-- H7: Health endpoint: `GET /health` returns `{"status": "ok"}` without auth (registered via `@mcp.custom_route()`).
+- H7: Health endpoint: `GET /health` is unauthenticated (registered via `@mcp.custom_route()`) and reports **readiness**, not liveness. It answers `200` with `{"status": "ok", "kernel": "ready", "render_backend": "pyrender"|"matplotlib", "version": "..."}` once the geometry kernel process has imported CadQuery, and `503` with `"status": "starting"` before that. Liveness and readiness differ here by about 3.3s of kernel import, and a platform health check that cannot tell them apart routes traffic to a machine whose first `execute_cad` has no kernel to run on. With `CAD_MCP_ISOLATE_GEOMETRY=0` there is no separate process to wait for and `kernel` reads `in-process`. `render_backend` names the backend N5 actually selected on this host, so a deployment states its backend rather than assuming one (§10.4).
 
 **Files:** `src/cad_mcp/transport.py` (configure transport from env/args), updates to `server.py` main().
 
-**Gate:** server starts on `--transport http`; `curl /health` returns 200; tool call via `mcp` client over HTTP succeeds; request without token returns 401 when `CAD_MCP_AUTH_TOKEN` is set; stdio mode still works.
+**Gate:** server starts on `--transport http`; `curl /health` returns 200 once the kernel is up, and 503 before it; tool call via `mcp` client over HTTP succeeds; request without token returns 401 when `CAD_MCP_AUTH_TOKEN` is set; stdio mode still works.
 
 ---
 
@@ -246,6 +246,69 @@ Requirements:
 **Gate:** create two parts (box + lid), position lid above box, render shows both with different colors, export produces 3 STLs (box, lid, assembly), validate flags interference when lid overlaps box, clearance measurement returns 0 when touching and >0 when separated.
 
 ---
+
+### 10.4 Hosted deployment
+
+`cad-mcp` may run as a single hosted instance reachable over HTTPS by any
+MCP client. Two properties of this server shape the whole design and are
+not negotiable:
+
+- **It needs an ordinary Linux userspace.** `cadquery` binds OCCT (a
+  native C++ kernel), `sandbox.py` spawns a subprocess per execution and
+  caps it with `setrlimit`, `geometry.py` runs a second long-lived
+  subprocess, and rendering wants an offscreen GL stack. Runtimes that
+  execute Python as WebAssembly cannot host this.
+- **The transport is stateful.** The server issues an `Mcp-Session-Id`,
+  and every later request for that session must reach the same process,
+  because parts, code history and the cached `.brep` live on one
+  machine's local disk. `CAD_MCP_STATELESS=1` is not an alternative: it
+  breaks the core loop, since `render_views` and `export_model` read
+  state a previous `execute_cad` wrote.
+
+**Session affinity.** Clients send no platform routing headers, so
+affinity is established server-side by wrapping the session id:
+`<machine-id>~<sdk-id>` is handed to the client and unwrapped before the
+request reaches the MCP app, which never learns it happened. A machine
+receiving a session it does not own answers `fly-replay: instance=<id>`;
+if the request already carries `fly-replay-src` the owner is gone, and
+the answer is a JSON-RPC `-32600` telling the client to re-initialize —
+never a 500. With no machine id in the environment the middleware is a
+pass-through, so local runs are unchanged. Code history is the source of
+truth (§7), so a client whose machine was replaced re-initializes and
+replays; exports already written are lost with that machine's disk.
+
+**Public URL.** `CAD_MCP_PUBLIC_URL` is required off loopback.
+`host`/`port` are the *bind* address; behind a proxy they are
+`0.0.0.0:8000`, and publishing that as the OAuth protected-resource URL
+gives clients an address they cannot dereference over a scheme they did
+not use. The server warns at start-up when it is bound non-loopback
+without one.
+
+**Rendering.** The container ships runtime dependencies only, so the
+`gpu` extra is absent and the active backend is the matplotlib fallback
+that N5 permits. Which backend is live must be *stated* by any
+deployment, not assumed, which is why `GET /health` reports it (H7)
+rather than leaving it to be inferred from the image contents.
+
+**Measured** in the container on the development machine (12 cores,
+matplotlib backend), against the N2 budgets:
+
+| | measured | budget |
+|---|---|---|
+| `render_views`, warm | 0.40s / 0.41s | ≤2s |
+| `execute_cad`, cold kernel | 3.21s | ≤5s |
+| `validate_mesh` | 0.07s | ≤5s |
+| container start → `/health` 200 | 4–6s | — |
+
+N1's guarantees hold unchanged inside the container: network egress from
+user code blocked, writes outside the session directory denied with no
+file created, and the wall-clock timeout enforced. Exports go to a
+durable directory outside the session temp dir (G4).
+
+Fly.io-specific configuration, the deploy workflow and the rollback
+procedure live in `docs/deploy.md`. Deployment to a real host, and
+therefore proof that `fly-replay` routes correctly across more than one
+machine, is not yet done.
 
 ## 11. v2+ backlog
 Parametric "tweak sliders" resource · STEP import + modify · multi-material 3MF · image-to-3D via Meshy `v1/image-to-3d` · undo/redo per part · assembly constraints solver (mate, align, offset).

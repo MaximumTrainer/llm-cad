@@ -276,6 +276,10 @@ def test_fork_is_blocked(tmp_session: Path) -> None:
 # ------------------------------------------------------------------
 
 
+# Wall-clock: the assertion is about how fast the timeout fires, which
+# means nothing while eleven other workers own the CPU.
+@pytest.mark.slow
+@pytest.mark.serial
 def test_infinite_loop_is_killed(tmp_session: Path) -> None:
     start = time.monotonic()
     result = sandbox.run("while True: pass", tmp_session, timeout=5)
@@ -286,6 +290,10 @@ def test_infinite_loop_is_killed(tmp_session: Path) -> None:
     assert elapsed < 25, f"Timeout took {elapsed:.1f}s to fire"
 
 
+# Counts python processes on the *host*, so a parallel run attributes
+# other workers' subprocesses to this test (measured: 62 -> 68).
+@pytest.mark.slow
+@pytest.mark.serial
 def test_timeout_kills_grandchildren(tmp_session: Path) -> None:
     """Nothing may outlive the timeout.
 
@@ -307,7 +315,10 @@ def test_timeout_kills_grandchildren(tmp_session: Path) -> None:
     )
 
 
+# Allocating 1.5GB while eleven other workers each hold a resident
+# CadQuery is how you measure the machine, not the memory cap.
 @pytest.mark.slow
+@pytest.mark.serial
 def test_memory_bomb_is_killed(tmp_session: Path) -> None:
     """A runaway allocation must be stopped on every platform.
 

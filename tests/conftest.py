@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -27,6 +28,68 @@ def _xdist_workers() -> int:
         return int(raw) if raw else 1
     except ValueError:
         return 1
+
+
+#: Steady-state memory a single xdist worker costs: the pytest process
+#: itself, plus the long-lived geometry kernel it will start (issue #10),
+#: plus a transient sandbox child. Measured at roughly 1.2GB; 1.3 leaves
+#: a little room.
+_GB_PER_WORKER = 1.3
+
+
+def _available_gb() -> float | None:
+    """Free physical memory, or None when we cannot tell."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _Status(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _Status()
+            status.dwLength = ctypes.sizeof(_Status)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+            return float(status.ullAvailPhys) / (1024**3)
+
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / (1024**2)
+    except Exception:
+        return None
+    return None
+
+
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+    """Bound `-n auto` by memory as well as cores.
+
+    One worker per core is the wrong answer for this suite. Each one
+    holds a resident CadQuery in the pytest process *and* a geometry
+    kernel beside it, so twelve workers want something like 15GB. Run it
+    on a 12-core machine that is also hosting a container and the failure
+    is not a clean OOM: OpenBLAS gives up allocating inside `import
+    numpy`, and 46 tests fail with errors that look like geometry bugs.
+
+    Measured here: 12 workers 127s, 6 workers 144s. Thirteen percent is
+    a fair price for a suite that does not fail because something else
+    was running.
+    """
+    cores = os.cpu_count() or 2
+    available = _available_gb()
+    if available is None:
+        return max(2, min(cores, 8))
+    by_memory = int(available / _GB_PER_WORKER)
+    return max(2, min(cores, by_memory))
 
 
 def pytest_collection_modifyitems(

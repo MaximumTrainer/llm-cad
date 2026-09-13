@@ -128,6 +128,22 @@ def active_backend() -> str:
     return "pyrender" if _check_pyrender() else "matplotlib"
 
 
+def known_backend() -> str | None:
+    """The backend, if it has already been determined; otherwise None.
+
+    `active_backend` settles the question by building a throwaway EGL
+    context, which is the wrong thing to do inside `/health`: it is slow
+    on first call and it runs on the event loop. `main()` settles it
+    during pre-warm, so by the time the server reports ready this
+    answers without probing.
+    """
+    if forced_backend() == "matplotlib":
+        return "matplotlib"
+    if _HAS_PYRENDER is None:
+        return None
+    return "pyrender" if _HAS_PYRENDER else "matplotlib"
+
+
 def grid_shape(n_views: int) -> tuple[int, int]:
     """(rows, cols) for *n_views* cells, shared by both backends.
 

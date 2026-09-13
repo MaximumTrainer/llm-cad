@@ -1,0 +1,157 @@
+name: Deploy
+
+# SPEC 10.4 / issue #1. `git push` to main deploys; nobody runs flyctl
+# from a laptop.
+#
+# The gate order is the whole point: a red test suite must not reach
+# production, and a deploy that serves a broken render must not be
+# reported green -- which is why `smoke` runs against the deployed URL
+# rather than localhost.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Dockerfile'
+      - 'fly.toml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which app to deploy'
+        type: choice
+        options: [production, staging]
+        default: staging
+      ref:
+        description: 'git SHA to deploy (blank = this ref). Use to roll back.'
+        type: string
+        default: ''
+
+# Overlapping pushes must queue, not race a half-finished deploy.
+concurrency:
+  group: deploy-${{ inputs.target || 'production' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # The image is only worth building if the code is worth shipping.
+  test:
+    name: lint + types + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run ruff check .
+      - run: uv run mypy
+      - name: pytest (parallel)
+        run: uv run pytest -q
+      - name: pytest (serial — wall-clock budgets)
+        run: uv run pytest -q -m serial -n0
+
+  # The container must be buildable and actually able to serve before we
+  # point a real hostname at it. This runs with no Fly credentials, so it
+  # also gates pull requests from people who have none.
+  container:
+    name: build + smoke the image locally
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: docker/setup-buildx-action@v3
+      - name: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: cad-mcp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: record image size
+        run: docker image inspect cad-mcp:ci --format '{{.Size}}' | awk '{printf "image size: %.2f GB\n", $1/1024/1024/1024}'
+      - name: run it
+        run: |
+          docker run -d --name cad-mcp \
+            -p 8000:8000 \
+            -e CAD_MCP_AUTH_TOKEN=ci-smoke-token \
+            -e CAD_MCP_PUBLIC_URL=http://127.0.0.1:8000 \
+            -e CAD_MCP_ALLOWED_HOSTS=127.0.0.1:8000,localhost:8000 \
+            cad-mcp:ci
+          # -f fails on the 503 the server returns until the kernel has
+          # imported CadQuery, so this waits for *ready*, not for the
+          # port to open.
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              echo "ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::container never became healthy"
+          docker logs cad-mcp
+          exit 1
+      - name: which render backend is live (SPEC N5 / A8)
+        # From /health, so CI reads exactly what an operator would.
+        run: curl -fsS http://127.0.0.1:8000/health
+      - name: remote smoke (the full core loop over HTTP)
+        run: uv run --with mcp python scripts/smoke_remote.py --url http://127.0.0.1:8000 --token ci-smoke-token --repeat 3
+      - if: always()
+        run: docker logs cad-mcp 2>&1 | tail -100
+
+  # Everything below needs Fly credentials. Gated on an environment so a
+  # fork PR cannot reach the token.
+  deploy:
+    name: deploy to ${{ inputs.target || 'production' }}
+    needs: container
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target || 'production' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          APP="${{ inputs.target == 'staging' && 'cad-mcp-staging' || 'cad-mcp' }}"
+          # --remote-only: Fly's builder does the work, so this runner
+          # never holds or pushes multi-GB layers.
+          flyctl deploy --remote-only --app "$APP" --wait-timeout 600
+      - name: record the release, for the rollback path
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl releases list --app "${{ inputs.target == 'staging' && 'cad-mcp-staging' || 'cad-mcp' }}" | head -5
+
+  smoke:
+    name: smoke the deployment
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target || 'production' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --no-dev
+      - name: full core loop against the live URL
+        env:
+          CAD_MCP_AUTH_TOKEN: ${{ secrets.CAD_MCP_AUTH_TOKEN }}
+        run: |
+          URL="${{ inputs.target == 'staging' && 'https://cad-mcp-staging.fly.dev' || 'https://cad-mcp.fly.dev' }}"
+          # --repeat 10 is what makes FLY-3 meaningful: one iteration can
+          # pass by luck on a single machine.
+          uv run python scripts/smoke_remote.py --url "$URL" --token "$CAD_MCP_AUTH_TOKEN" --repeat 10
