@@ -10,13 +10,77 @@ Two things every test needs and none should have to remember:
 """
 from __future__ import annotations
 
+import contextlib
+import os
+import socket
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from cad_mcp import session
+
+def _xdist_workers() -> int:
+    """How many workers are running, 1 when xdist is off."""
+    raw = os.environ.get("PYTEST_XDIST_WORKER_COUNT")
+    try:
+        return int(raw) if raw else 1
+    except ValueError:
+        return 1
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Keep contention-sensitive tests out of a parallel run.
+
+    A wall-clock budget measured while eleven other workers saturate the
+    CPU is not a measurement of anything, and SPEC N2's budgets were the
+    first thing to go red when `-n auto` was switched on. Skipping them
+    here rather than loosening the budgets keeps the assertions worth
+    making; CI runs them in a dedicated serial job, so nothing is lost.
+    """
+    if _xdist_workers() <= 1:
+        return
+    skip = pytest.mark.skip(
+        reason=(
+            "contention-sensitive; run serially with "
+            "`uv run pytest -m serial -n0`"
+        )
+    )
+    for item in items:
+        if "serial" in item.keywords:
+            item.add_marker(skip)
+
+
+# Both of these must be set before `cad_mcp.sandbox` is imported: it
+# reads them into module constants, and `run()` binds the timeout as a
+# default argument at definition time, so patching later is too late.
+if _xdist_workers() > 1:
+    # The warm worker exists to keep the ~3.3s CadQuery import off the
+    # *latency* critical path of a single call. In a parallel suite it
+    # buys no wall clock and costs a second resident OCP process per
+    # worker -- with `-n auto` that is up to 24 of them, and the memory
+    # pressure alone makes everything slower. The behaviour it provides
+    # is asserted by the `serial` perf tests, which run with the warm
+    # worker on and the machine to themselves.
+    os.environ.setdefault("CAD_MCP_WARM_WORKER", "0")
+
+from cad_mcp import session  # noqa: E402
+
+
+@pytest.fixture
+def free_port() -> int:
+    """An unused TCP port.
+
+    The HTTP integration tests used to hardcode 18923/18924, which two
+    xdist workers will happily try to bind at the same moment.
+    """
+    with contextlib.closing(socket.socket()) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        port: int = sock.getsockname()[1]
+    return port
 
 
 @pytest.fixture(autouse=True)

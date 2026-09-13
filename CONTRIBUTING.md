@@ -28,7 +28,8 @@ A change is done when **all** of these are true:
 - [ ] **README tool table** has a row for any new tool.
 - [ ] **Response envelope** conformed to (`cad_mcp.envelope`), so the LLM
       sees one shape across all tools.
-- [ ] `uv run ruff check . && uv run mypy && uv run pytest -q` green.
+- [ ] `uv run ruff check . && uv run mypy && uv run pytest -q` green,
+      plus `uv run pytest -m serial -n0` if you touched timing or the sandbox.
 - [ ] Hooks green without `--no-verify`.
 
 ## The rules that exist because they were broken
@@ -52,7 +53,9 @@ Use them rather than working from memory.
 ## Test markers
 
 ```bash
-uv run pytest -q                      # default: everything except live LLM tests
-uv run pytest -m "not slow" -q        # fast feedback
+uv run pytest -q                      # default: parallel, everything but llm + serial
+uv run pytest -m serial -n0           # wall-clock budgets; needs an idle machine
+uv run pytest -m "not geometry and not slow" -n0   # fast tier, <30s
 uv run pytest -m llm -v               # live OpenRouter tests (needs a key)
+uv run pytest -n0                     # serial, for debugging a single failure
 ```

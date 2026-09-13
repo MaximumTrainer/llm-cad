@@ -55,10 +55,18 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-extras
-      - name: pytest (fast subset first, for quick signal)
-        run: uv run pytest -q -m "not geometry and not slow"
-      - name: pytest (full)
+      # Under 30s, and it covers the envelope, argument handling and the
+      # error paths -- so a broken PR usually fails here, minutes before
+      # the geometry tests finish.
+      - name: pytest (fast tier, for quick signal)
+        run: uv run pytest -q -m "not geometry and not slow" -n0
+      - name: pytest (full, parallel)
         run: uv run pytest -q
+      # Wall-clock budgets and timeout probes mean nothing while eleven
+      # other workers saturate the CPU, so they sit out the parallel run
+      # and get the machine to themselves here.
+      - name: pytest (serial — wall-clock budgets and timeouts)
+        run: uv run pytest -q -m serial -n0
       - name: smoke (full loop)
         run: uv run python scripts/smoke.py
 

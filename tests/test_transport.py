@@ -190,12 +190,18 @@ class TestHTTPIntegration:
     """Start the server as a subprocess on HTTP and test endpoints."""
 
     @pytest.fixture
-    def server_proc(self) -> subprocess.Popen[bytes]:  # type: ignore[type-arg]
-        """Start cad-mcp on HTTP in a subprocess, wait for ready."""
+    def server_proc(
+        self, free_port: int
+    ) -> subprocess.Popen[bytes]:  # type: ignore[type-arg]
+        """Start cad-mcp on HTTP in a subprocess, wait for ready.
+
+        The port comes from a fixture rather than a literal: two xdist
+        workers bound the same hardcoded 18923 and one of them lost.
+        """
         env = {
             **os.environ,
             "CAD_MCP_TRANSPORT": "http",
-            "CAD_MCP_PORT": "18923",
+            "CAD_MCP_PORT": str(free_port),
         }
         env.pop("CAD_MCP_AUTH_TOKEN", None)
         proc = subprocess.Popen(
@@ -204,18 +210,21 @@ class TestHTTPIntegration:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        _wait_for_port(18923, timeout=15)
+        # Generous: server start-up competes with every other worker.
+        _wait_for_port(free_port, timeout=60)
         yield proc  # type: ignore[misc]
         proc.terminate()
         proc.wait(timeout=5)
 
     @pytest.fixture
-    def auth_server_proc(self) -> subprocess.Popen[bytes]:  # type: ignore[type-arg]
+    def auth_server_proc(
+        self, free_port: int
+    ) -> subprocess.Popen[bytes]:  # type: ignore[type-arg]
         """Start cad-mcp on HTTP with auth."""
         env = {
             **os.environ,
             "CAD_MCP_TRANSPORT": "http",
-            "CAD_MCP_PORT": "18924",
+            "CAD_MCP_PORT": str(free_port),
             "CAD_MCP_AUTH_TOKEN": "test-secret-token",
         }
         proc = subprocess.Popen(
@@ -224,34 +233,36 @@ class TestHTTPIntegration:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        _wait_for_port(18924, timeout=15)
+        _wait_for_port(free_port, timeout=60)
         yield proc  # type: ignore[misc]
         proc.terminate()
         proc.wait(timeout=5)
 
-    def test_health_endpoint(self, server_proc: subprocess.Popen[bytes]) -> None:
+    def test_health_endpoint(
+        self, server_proc: subprocess.Popen[bytes], free_port: int
+    ) -> None:
         import urllib.request
 
-        resp = urllib.request.urlopen("http://127.0.0.1:18923/health")
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{free_port}/health")
         assert resp.status == 200
         body = json.loads(resp.read())
         assert body == {"status": "ok"}
 
     def test_health_no_auth_required(
-        self, auth_server_proc: subprocess.Popen[bytes]
+        self, auth_server_proc: subprocess.Popen[bytes], free_port: int
     ) -> None:
         import urllib.request
 
-        resp = urllib.request.urlopen("http://127.0.0.1:18924/health")
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{free_port}/health")
         assert resp.status == 200
 
     def test_mcp_endpoint_returns_401_without_token(
-        self, auth_server_proc: subprocess.Popen[bytes]
+        self, auth_server_proc: subprocess.Popen[bytes], free_port: int
     ) -> None:
         import urllib.request
 
         req = urllib.request.Request(
-            "http://127.0.0.1:18924/mcp",
+            f"http://127.0.0.1:{free_port}/mcp",
             data=b"{}",
             headers={"Content-Type": "application/json"},
             method="POST",

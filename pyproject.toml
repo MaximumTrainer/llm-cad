@@ -59,17 +59,43 @@ packages = ["src/cad_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-    "llm: live LLM calls via OpenRouter; needs OPENROUTER_API_KEY, costs money",
-    "integration: talks to a network service",
-    "slow: perf budgets, resource limits, subprocess probes; seconds each",
-]
-# Live LLM tests are opt-in: select them with `-m llm`.
+# Marker semantics. A test carries a marker when it pays that cost, so
+# the selections below mean what they say:
 #
+#   geometry     builds real geometry, so it pays at least one sandbox
+#                subprocess (~3.5s cold, less with the warm worker) or a
+#                tessellation. Everything under `tests/` that calls
+#                `execute_cad` has it.
+#   slow         seconds on its own account: perf budgets, resource
+#                limits, timeout probes, cross-process determinism.
+#   integration  talks to a network service.
+#   llm          live LLM calls via OpenRouter; costs money.
+#
+# An *unmarked* test is the fast tier: no sandbox, no render, no network.
+# It covers the response envelope, argument handling, error paths, docs
+# consistency and pure helpers via fixtures rather than live runs, and the
+# whole tier is expected to stay under 30s.
+markers = [
+    "geometry: builds real geometry; pays a sandbox subprocess or a tessellation",
+    "slow: seconds each on its own account (perf budgets, resource limits, subprocess probes)",
+    "integration: talks to a network service",
+    "llm: live LLM calls via OpenRouter; needs OPENROUTER_API_KEY, costs money",
+    "serial: wall-clock sensitive; skipped under -n >1 and run in a serial pass",
+]
 #   uv run pytest                            everything except live LLM
-#   uv run pytest -m "not slow"              fast feedback (pre-commit)
+#   uv run pytest -m "not geometry and not slow"   the fast tier (<30s)
 #   uv run pytest -m llm                     live OpenRouter tests
-addopts = "-m 'not llm'"
+#   uv run pytest -m serial -n0      the budget/timeout tests
+#   uv run pytest -n0                serial, for debugging
+#
+# `-n auto` is the difference between a suite that runs before a commit
+# and one that does not: the work is overwhelmingly independent sandbox
+# subprocesses. `worksteal` rather than `load` or `loadfile` because the
+# tests are wildly heterogeneous -- 0.01s envelope checks next to 30s
+# subprocess probes -- and a static split leaves workers idle while one
+# grinds through the long tail. Measured on 12 cores: loadfile 195s,
+# worksteal 157s, against a 539s serial baseline (CAD-025).
+addopts = "-m 'not llm' -n auto --dist worksteal"
 
 [tool.mypy]
 strict = true
@@ -98,5 +124,6 @@ dev = [
     "mypy>=2.3.1",
     "pytest>=9.1.1",
     "pytest-anyio>=0.0.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.16.5",
 ]

@@ -80,6 +80,10 @@ async def _build_bracket() -> None:
 # ------------------------------------------------------------------
 
 
+# A 2s wall-clock budget is only a measurement when the machine is not
+# also running eleven other test workers (CAD-025).
+@pytest.mark.serial
+@pytest.mark.slow
 @pytest.mark.anyio
 async def test_bracket_render_under_2s() -> None:
     await _build_bracket()

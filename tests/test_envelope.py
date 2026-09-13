@@ -22,7 +22,9 @@ from cad_mcp.server import mcp
 
 # Builds real geometry, so each test pays a sandbox subprocess.
 # Deselect with -m "not geometry" for fast feedback (CAD-025).
-pytestmark = pytest.mark.geometry
+# The envelope helpers and the failure-path conformance sweep are pure
+# argument handling: a tool called with bad arguments never reaches the
+# kernel. Only the success-path conformance tests build anything.
 
 BOX = "import cadquery as cq\nresult = cq.Workplane('XY').box(10, 10, 10)"
 
@@ -150,6 +152,7 @@ def _tool_names() -> list[str]:
     return sorted(t.name for t in anyio.run(mcp.list_tools))
 
 
+@pytest.mark.geometry
 @pytest.mark.parametrize("name", sorted(SUCCESS_ARGS))
 def test_success_responses_conform(name: str) -> None:
     async def scenario() -> str:
@@ -189,6 +192,7 @@ def test_render_views_error_path_conforms() -> None:
     assert payload["error"]["type"] == "NoModel"
 
 
+@pytest.mark.geometry
 def test_render_views_success_returns_an_image_and_a_summary() -> None:
     async def scenario() -> Any:
         await mcp.call_tool("execute_cad", {"code": BOX})
@@ -210,6 +214,7 @@ def test_every_tool_is_covered_by_this_file() -> None:
     )
 
 
+@pytest.mark.geometry
 def test_execute_cad_error_reports_line_and_hint() -> None:
     """The envelope must not have lost SPEC N3's detail."""
 
@@ -229,6 +234,7 @@ def test_execute_cad_error_reports_line_and_hint() -> None:
     assert error.get("hint"), f"no hint: {error}"
 
 
+@pytest.mark.geometry
 def test_execute_cad_success_summary_is_still_readable() -> None:
     """The old prose summary is preserved inside the envelope."""
 
@@ -242,6 +248,7 @@ def test_execute_cad_success_summary_is_still_readable() -> None:
     assert payload["data"]["solid_count"] == 1
 
 
+@pytest.mark.geometry
 def test_validate_mesh_shape_is_the_same_for_one_and_many_parts() -> None:
     """The single-part path used to return a bare report with no `ok`."""
 

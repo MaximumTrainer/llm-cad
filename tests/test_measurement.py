@@ -65,12 +65,29 @@ result = (
 """
 
 
+# One sandbox subprocess per distinct shape, not per test. Twenty-two
+# tests share five shapes here, and each build cost ~3.5s of interpreter
+# start-up plus CadQuery import for geometry that is immutable once
+# written -- `validate()` and `measure()` only ever read it (CAD-025).
+_BREP_CACHE: dict[str, Path] = {}
+
+
 def _brep(code: str) -> Path:
-    """Build geometry outside a session, for direct validate() calls."""
+    """Build geometry outside a session, for direct validate() calls.
+
+    Cached for the whole test session. Safe because the B-rep is read
+    only: nothing downstream of this writes to the file, and the tests
+    that do mutate state go through a real session instead.
+    """
+    cached = _BREP_CACHE.get(code)
+    if cached is not None and cached.exists():
+        return cached
+
     tmp = Path(tempfile.mkdtemp(prefix="cad-mcp-measure-"))
     out = tmp / "shape.brep"
     result = sandbox.run(code, tmp, brep_out=out)
     assert result.ok, f"fixture build failed: {result.to_dict()}"
+    _BREP_CACHE[code] = out
     return out
 
 

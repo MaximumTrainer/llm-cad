@@ -165,12 +165,14 @@ def test_canonicalise_3mf_leaves_a_readable_zip(tmp_path: Path) -> None:
 @pytest.mark.geometry
 @pytest.mark.slow
 def test_every_format_is_byte_stable_across_processes(
-    tmp_path: Path,
+    shared_workdir: Path,
 ) -> None:
     """SPEC N4, the whole claim: all four formats, two fresh interpreters."""
     from determinism_check import FORMATS, check
 
-    hashes = check(runs=2, workdir=tmp_path / "det")
+    # Reuses the B-rep the `exported` fixture built rather than paying a
+    # third CadQuery start-up for identical geometry.
+    hashes = check(runs=2, workdir=shared_workdir)
 
     assert set(hashes) == set(FORMATS)
     # A format that silently wrote nothing would also be "stable".
@@ -178,13 +180,19 @@ def test_every_format_is_byte_stable_across_processes(
 
 
 @pytest.fixture(scope="module")
-def exported(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+def shared_workdir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One directory, so the B-rep is built once for the whole module."""
+    return tmp_path_factory.mktemp("det")
+
+
+@pytest.fixture(scope="module")
+def exported(shared_workdir: Path) -> dict[str, Path]:
     """One build, every format -- the validity tests all share it."""
     from determinism_check import FORMATS, _ext, _run_child, _sentinel
 
-    root = tmp_path_factory.mktemp("det-valid")
+    root = shared_workdir
     brep_dir = root / "brep"
-    brep_dir.mkdir()
+    brep_dir.mkdir(exist_ok=True)
     brep = brep_dir / "model.brep"
     _run_child(["--build-brep", str(brep)], "brep build")
     assert _sentinel(brep_dir).exists(), "B-rep build child did not finish"

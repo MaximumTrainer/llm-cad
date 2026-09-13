@@ -114,7 +114,10 @@ def check(runs: int = 2, workdir: Path | None = None) -> dict[str, str]:
     brep_dir = root / "brep"
     brep_dir.mkdir(parents=True, exist_ok=True)
     brep = brep_dir / "model.brep"
-    _run_child(["--build-brep", str(brep)], "brep build")
+    # Reuse a B-rep a caller already built in this workdir: the shape is
+    # fixed, so rebuilding it is a wasted CadQuery start-up.
+    if not brep.exists():
+        _run_child(["--build-brep", str(brep)], "brep build")
     if not _sentinel(brep_dir).exists() or not brep.exists():
         msg = "the B-rep build child did not complete"
         raise RuntimeError(msg)

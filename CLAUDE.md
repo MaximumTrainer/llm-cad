@@ -38,7 +38,9 @@ The visual feedback loop is the product. Any change that makes renders slower th
 - `release-check` — before tagging
 
 ## Commands
-- `uv run pytest` — full test suite
+- `uv run pytest` — full suite, parallel (~2.5 min; excludes `serial`)
+- `uv run pytest -m serial -n0` — wall-clock budgets and timeout probes, un-contended
+- `uv run pytest -m "not geometry and not slow" -n0` — fast tier, <30s, no sandbox
 - `uv run cad-mcp` — start server on stdio
 - `uv run cad-mcp --transport http` — start server on streamable HTTP (port 8000)
 - `uv run python scripts/smoke.py` — end-to-end: builds a bracket, renders, validates, exports

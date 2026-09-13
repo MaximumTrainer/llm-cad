@@ -132,7 +132,8 @@ CAD_MCP_TRANSPORT=http uv run cad-mcp
 ## Development
 
 ```bash
-uv run pytest             # tests (live LLM tests excluded by default)
+uv run pytest             # tests, parallel (live LLM + serial excluded)
+uv run pytest -m serial -n0   # wall-clock budgets, run un-contended
 uv run ruff check .       # lint
 uv run mypy --strict src/cad_mcp  # type check
 uv run python scripts/smoke.py   # end-to-end smoke test

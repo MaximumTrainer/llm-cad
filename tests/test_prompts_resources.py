@@ -21,7 +21,7 @@ from .envelope_helpers import summary
 
 # Builds real geometry, so each test pays a sandbox subprocess.
 # Deselect with -m "not geometry" for fast feedback (CAD-025).
-pytestmark = pytest.mark.geometry
+# Prompts and example resources are static text (CAD-025).
 
 
 @pytest.fixture(autouse=True)
@@ -121,6 +121,7 @@ async def test_session_code_empty() -> None:
     assert "No model code yet" in text
 
 
+@pytest.mark.geometry
 @pytest.mark.anyio
 async def test_session_code_after_execute() -> None:
     code = "import cadquery as cq\nresult = cq.Workplane('XY').box(10,10,10)"
@@ -163,6 +164,7 @@ async def test_all_examples_registered() -> None:
     assert set(EXAMPLES.keys()) == expected
 
 
+@pytest.mark.geometry
 @pytest.mark.anyio
 @pytest.mark.parametrize("name", sorted(EXAMPLES.keys()))
 async def test_example_executes(name: str) -> None:

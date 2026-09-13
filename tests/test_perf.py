@@ -34,7 +34,9 @@ from cad_mcp.server import mcp
 
 from .envelope_helpers import flat
 
-pytestmark = [pytest.mark.geometry, pytest.mark.slow]
+# `serial`: these are wall-clock budgets, so they are only a
+# measurement when nothing else is competing for the CPU.
+pytestmark = [pytest.mark.geometry, pytest.mark.slow, pytest.mark.serial]
 
 BOX = "import cadquery as cq\nresult = cq.Workplane('XY').box(10, 10, 10)"
 
