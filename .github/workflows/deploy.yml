@@ -113,9 +113,16 @@ jobs:
 
   # Everything below needs Fly credentials. Gated on an environment so a
   # fork PR cannot reach the token.
+  # Skipped until someone has actually created the Fly apps and set the
+  # repository variable. Without this guard, merging this workflow turns
+  # main red on the first push: there is no app to deploy to and no token
+  # to deploy with. `test` and `container` still run and still gate, so
+  # main keeps proving the image builds and serves.
+  #   gh variable set FLY_DEPLOY_ENABLED --body true
   deploy:
     name: deploy to ${{ inputs.target || 'production' }}
     needs: container
+    if: vars.FLY_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: ${{ inputs.target || 'production' }}
     steps:
@@ -139,6 +146,7 @@ jobs:
   smoke:
     name: smoke the deployment
     needs: deploy
+    if: vars.FLY_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: ${{ inputs.target || 'production' }}
     steps:

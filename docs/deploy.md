@@ -178,6 +178,19 @@ truth (SPEC §7): the client re-initializes and replays its code. Exports
 already written are lost with the machine's disk, which is why they
 should be fetched when produced rather than left to accumulate.
 
+### Turning deploys on
+
+The `deploy` and `smoke` jobs are skipped until the Fly apps exist:
+
+```bash
+gh variable set FLY_DEPLOY_ENABLED --body true
+```
+
+Without that guard, merging the workflow turns `main` red on the first
+push — there is no app to deploy to and no token to deploy with. The
+`test` and `container` jobs run regardless, so `main` keeps proving that
+the image builds and serves even while nothing is hosted.
+
 ### Deploying
 
 `git push` to `main` deploys, via `.github/workflows/deploy.yml`. The
