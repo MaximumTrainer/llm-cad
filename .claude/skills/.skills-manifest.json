@@ -1,0 +1,23 @@
+{
+  "source": "MaximumTrainer/agent-skills",
+  "skills": {
+    "docs-drift-guard": {
+      "directory": "docs-drift-guard",
+      "version": "1.0.0",
+      "ref": "main",
+      "files": {
+        "SKILL.md": "1f497e1edffe0c5c"
+      },
+      "vendored": "2026-09-13"
+    },
+    "outside-in-tdd": {
+      "directory": "outside-in-tdd",
+      "version": "1.0.0",
+      "ref": "main",
+      "files": {
+        "SKILL.md": "2b8412d16f1d96ad"
+      },
+      "vendored": "2026-09-13"
+    }
+  }
+}
