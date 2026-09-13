@@ -357,27 +357,28 @@ def check_interference(
     translate_b: tuple[float, float, float],
     rotate_b: tuple[float, float, float],
 ) -> float:
-    """Compute interference volume between two transformed parts.
+    """Overlap volume in mm3 between two transformed parts.
 
-    Returns the overlap volume in mm³.  A value > 0.01 indicates
-    actual interference.
+    A value > 0.01 means the parts actually intersect. The boolean runs
+    in the isolated geometry worker: a degenerate common operation is one
+    of the likelier ways to segfault OCCT, and it must not take the
+    server with it (issue #10).
     """
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
-    from OCP.BRepGProp import BRepGProp
-    from OCP.GProp import GProp_GProps
+    from cad_mcp import geometry
 
-    from cad_mcp.export import _load_ocp_shape, transform_ocp_shape
-
-    shape_a = _load_ocp_shape(brep_a)
-    shape_b = _load_ocp_shape(brep_b)
-    shape_a = transform_ocp_shape(shape_a, translate_a, rotate_a)
-    shape_b = transform_ocp_shape(shape_b, translate_b, rotate_b)
-
-    common = BRepAlgoAPI_Common(shape_a, shape_b)
-    if not common.IsDone():
-        return 0.0
-
-    intersection = common.Shape()
-    props = GProp_GProps()
-    BRepGProp.VolumeProperties_s(intersection, props)
-    return float(abs(props.Mass()))
+    result = geometry.call(
+        "interference",
+        parts=[
+            {
+                "brep_path": str(brep_a),
+                "translate": list(translate_a),
+                "rotate": list(rotate_a),
+            },
+            {
+                "brep_path": str(brep_b),
+                "translate": list(translate_b),
+                "rotate": list(rotate_b),
+            },
+        ],
+    )
+    return float(result["volume_mm3"])

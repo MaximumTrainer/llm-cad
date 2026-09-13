@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -60,8 +61,6 @@ def _sentinel(out_dir: Path) -> Path:
 
 def _build_brep(brep: Path) -> None:
     """Child mode: evaluate MODEL_CODE and persist the B-rep."""
-    import os
-
     namespace: dict[str, object] = {}
     exec(MODEL_CODE, namespace)
     result = namespace["result"]
@@ -74,7 +73,11 @@ def _build_brep(brep: Path) -> None:
 
 def _export_all(brep: Path, out_dir: Path) -> None:
     """Child mode: write every format from *brep* into *out_dir*."""
-    import os
+    # This process *is* the isolation boundary, so exporting through a
+    # nested geometry worker would only orphan a second interpreter per
+    # run. The `os._exit` below is what covers the OCP teardown crash
+    # that isolation would otherwise have absorbed.
+    os.environ["CAD_MCP_GEOMETRY_ISOLATION"] = "0"
 
     from cad_mcp import export
 

@@ -67,15 +67,38 @@ Host LLM ── MCP (stdio | streamable HTTP) ── server.py (MCPServer)
                     ┌───────────────────────────┼──────────────────────┐
               tools/*.py                   session.py            prompts/, resources/
                     │                (state: parts[], active_part,
-              sandbox.py              code history, tmpdir)
-              (subprocess:
-               cadquery exec)
+                    │                 code history, tmpdir)
                     │
-              render.py (tessellate → pyrender/EGL → PNG grid)
-              validate.py (trimesh + manifold3d)
-              export.py (STEP via OCP/XCAF, STL/3MF/GLB via tessellation)
-              meshy.py (httpx → Meshy API, v2 only)
+                    ├── sandbox.py ──────► _sandbox_worker.py   [subprocess]
+                    │   untrusted user      single-use, confined, rlimited,
+                    │   code                30s; writes a .brep
+                    │
+                    ├── geometry.py ─────► _geometry_worker.py  [subprocess]
+                    │   OUR code, but       long-lived, reused, restarted on
+                    │   OCP is native       death. The ONLY place OCP runs:
+                    │                       tessellate, measure, STEP/XCAF
+                    │                       export, boolean interference,
+                    │                       mesh sewing (_geometry_ops.py)
+                    │
+                    └── in-process, no native kernel:
+                        render.py    (mesh → matplotlib/pyrender → PNG grid)
+                        validate.py  (trimesh + manifold3d)
+                        export.py    (STL/3MF/GLB from a tessellated mesh)
+                        meshy.py     (httpx → Meshy API, v2 only)
 ```
+**Why two subprocesses and not one.** They isolate different things.
+`sandbox.py` isolates code we do not trust, so its worker is single-use,
+confined to the session directory and rlimited — reusing it would leak
+one execution's namespace into the next. `geometry.py` isolates code we
+do trust from a kernel that cannot raise: OCP binds OCCT, and a
+degenerate boolean, a malformed shape or a teardown bug is a segfault,
+which no `except` will catch. Reuse is therefore correct *and* necessary
+there, since a fresh interpreter per call would buy no isolation and cost
+the ~3.3s CadQuery import every time. When that process dies the client
+gets a `GeometryKernelError` with a hint (N3) and the next call gets a
+new kernel; the server never goes down with it. Tessellations are cached
+on (path, mtime, size, tolerances), so one shape is meshed once no matter
+how many of render, validate and export ask for it (N2).
 Session state: the B-rep object cannot cross the subprocess boundary cheaply, so the subprocess serializes the shape to a BREP file in the session tmpdir; server-side tools reload it. Code history is the source of truth; the BREP file is a cache. In v2, each session holds an assembly of named parts, each with its own BREP and code history.
 
 ## 8. Key decisions and rationale

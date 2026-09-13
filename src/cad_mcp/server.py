@@ -1,6 +1,7 @@
 """MCP server entrypoint for cad-mcp."""
 from __future__ import annotations
 
+import logging
 import sys
 from typing import Any
 
@@ -65,9 +66,13 @@ def main() -> None:
 
     # Start a spare sandbox worker so the first execute_cad does not pay
     # the ~3.3s CadQuery import on the critical path (CAD-014).
-    from cad_mcp import sandbox
+    from cad_mcp import geometry, sandbox
 
     sandbox.prewarm()
+    # And the geometry kernel, for the same reason: the first render
+    # would otherwise pay that import again on the other side of the
+    # isolation boundary (issue #10).
+    geometry.POOL.prewarm()
 
     from cad_mcp.transport import parse_args
 
@@ -89,40 +94,62 @@ def main() -> None:
 
     run_kwargs = config.run_kwargs()
 
-    if config.cors_origin:
-        _run_with_cors(server, config, run_kwargs)
+    from cad_mcp import fly
+
+    # Only take the explicit ASGI path when something needs to wrap the
+    # app; `server.run()` stays the default so the common case keeps the
+    # SDK's own wiring.
+    if config.cors_origin or fly.machine_id():
+        _run_asgi(server, config, run_kwargs)
     else:
         server.run(transport="streamable-http", **run_kwargs)
 
 
-def _run_with_cors(
+def _run_asgi(
     server: MCPServer,
     config: Any,
     run_kwargs: dict[str, Any],
 ) -> None:
-    """Run HTTP transport with CORS middleware (SPEC 10.1 H5)."""
+    """Run HTTP transport with our own middleware stack.
+
+    CORS is SPEC 10.1 H5; the Fly wrapper is SPEC 10.4 session affinity.
+    """
     import uvicorn
     from starlette.middleware.cors import CORSMiddleware
+
+    from cad_mcp import fly
 
     app = server.streamable_http_app(
         **{k: v for k, v in run_kwargs.items() if k not in ("host", "port")},
     )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[config.cors_origin],
-        allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=[
-            "Authorization",
-            "Content-Type",
-            "Last-Event-ID",
-            "Mcp-Method",
-            "Mcp-Name",
-            "Mcp-Protocol-Version",
-            "Mcp-Session-Id",
-        ],
-        expose_headers=["Mcp-Session-Id"],
-    )
-    uvicorn.run(app, host=config.host, port=config.port)
+    if config.cors_origin:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[config.cors_origin],
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "Last-Event-ID",
+                "Mcp-Method",
+                "Mcp-Name",
+                "Mcp-Protocol-Version",
+                "Mcp-Session-Id",
+            ],
+            expose_headers=["Mcp-Session-Id"],
+        )
+
+    asgi: Any = app
+    machine = fly.machine_id()
+    if machine:
+        # Outermost: it must see the session id before anything else and
+        # rewrite it after everything else.
+        asgi = fly.FlyReplayMiddleware(app, machine)
+        logging.getLogger(__name__).info(
+            "fly session affinity active on machine %s", machine
+        )
+
+    uvicorn.run(asgi, host=config.host, port=config.port)
 
 
 if __name__ == "__main__":
