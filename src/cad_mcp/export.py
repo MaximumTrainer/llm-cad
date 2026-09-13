@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from cad_mcp._determinism import canonicalise_3mf, pin_step_header
 from cad_mcp.paths import unique_output_path
 from cad_mcp.render import TESS_ANGULAR, TESS_LINEAR, load_and_tessellate
 
@@ -83,6 +84,8 @@ def export_step(brep_path: Path, output_path: Path) -> Path:
     writer = STEPControl_Writer()
     Interface_Static.SetCVal_s("write.step.schema", "AP214")
     writer.Transfer(ocp_shape, STEPControl_AsIs)
+    # After Transfer (the header does not exist before it), before Write.
+    pin_step_header(writer)
     status = writer.Write(str(output_path))
 
     if status != IFSelect_RetDone:
@@ -121,6 +124,7 @@ def export_assembly_step(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = STEPCAFControl_Writer()
     writer.Transfer(doc)
+    pin_step_header(writer.ChangeWriter())
     status = writer.Write(str(output_path))
 
     if status != IFSelect_RetDone:
@@ -141,6 +145,11 @@ def export_stl(
 
     verts, faces = load_and_tessellate(brep_path, tolerance, angular_tolerance)
     mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+    # STL used to skip this while GLB and 3MF applied it, so the one
+    # format slicers care most about could ship inconsistent winding
+    # (CAD-017). fix_normals is deterministic for a given mesh, so N4
+    # still holds.
+    mesh.fix_normals()
     mesh.export(str(output_path), file_type="stl")
     return output_path
 
@@ -174,6 +183,7 @@ def export_3mf(
     mesh = trimesh.Trimesh(vertices=verts, faces=faces)
     mesh.fix_normals()
     mesh.export(str(output_path), file_type="3mf")
+    canonicalise_3mf(output_path)
     return output_path
 
 
@@ -192,6 +202,7 @@ def export_transformed_stl(
     verts, faces = load_and_tessellate(brep_path, tolerance)
     verts = apply_transform(verts, translate, rotate)
     mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+    mesh.fix_normals()
     mesh.export(str(output_path), file_type="stl")
     return output_path
 
@@ -217,6 +228,8 @@ def export_assembly_mesh(
     combined = trimesh.util.concatenate(meshes)
     combined.fix_normals()
     combined.export(str(output_path), file_type=fmt)
+    if fmt == "3mf":
+        canonicalise_3mf(output_path)
     return output_path
 
 

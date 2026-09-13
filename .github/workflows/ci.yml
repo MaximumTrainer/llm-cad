@@ -62,6 +62,67 @@ jobs:
       - name: smoke (full loop)
         run: uv run python scripts/smoke.py
 
+      # SPEC N4 has a cross-platform half that no single runner can check.
+      - name: determinism (separate processes)
+        run: >
+          uv run python scripts/determinism_check.py
+          --json determinism-${{ matrix.os }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: determinism-${{ matrix.os }}
+          path: determinism-${{ matrix.os }}.json
+
+  # SPEC N4's cross-platform half. Each `test` job hashed its own exports
+  # in two separate processes (that part is a blocking gate); this compares
+  # the results between operating systems.
+  #
+  # Informational on purpose, for now. OCCT tessellation is IEEE-754
+  # arithmetic through libm, and `macos-latest` is arm64 while the other
+  # runners are x86-64, so a last-ulp difference in a sin/cos used to
+  # discretise a fillet would change a vertex and therefore every byte
+  # downstream. That is a real possibility that has not been measured, and
+  # asserting it before measuring it would just paint the build red.
+  # Promote to a required check — and tighten SPEC N4 — once this job has
+  # been observed green across the matrix.
+  determinism-cross-os:
+    name: determinism (cross-OS, informational)
+    needs: test
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: determinism-*
+          merge-multiple: false
+      - name: every OS must agree, format by format
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+
+          runs = {}
+          for path in sorted(pathlib.Path(".").glob("determinism-*/*.json")):
+              runs[path.parent.name] = json.loads(path.read_text())
+
+          if len(runs) < 2:
+              sys.exit(f"expected >=2 platforms, got {sorted(runs)}")
+
+          formats = sorted(next(iter(runs.values())))
+          failed = []
+          for fmt in formats:
+              seen = {os_name: h[fmt] for os_name, h in runs.items()}
+              unique = set(seen.values())
+              status = "ok" if len(unique) == 1 else "DIFFERS"
+              print(f"{fmt:5} {status}")
+              if len(unique) != 1:
+                  failed.append(fmt)
+                  for os_name, digest in sorted(seen.items()):
+                      print(f"      {os_name:24} {digest}")
+
+          if failed:
+              sys.exit(f"SPEC N4 violated across platforms: {failed}")
+          print(f"all {len(formats)} formats byte-identical across {sorted(runs)}")
+          PY
+
   # PLAN Phase 2 gate: the matplotlib fallback must work where EGL is absent.
   render-fallback:
     name: render fallback (no EGL)
