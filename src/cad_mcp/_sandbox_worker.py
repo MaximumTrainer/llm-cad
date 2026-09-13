@@ -221,10 +221,43 @@ def serve() -> None:
         return
     job = json.loads(line)
 
+    _apply_memory_cap(job.get("memory_bytes"))
+
     global _RESULT_PATH
     _RESULT_PATH = job["result_out"]
     os.environ["CAD_MCP_BREP_OUT"] = job["brep_out"]
     _run_job(job["tmpdir"], job["code_path"], cadquery)
+
+
+def _apply_memory_cap(memory_bytes: object) -> None:
+    """Lower this worker's address-space limit to the caller's.
+
+    A warm worker was spawned before the call it ends up serving, so its
+    rlimits are whatever the default was at spawn time, not what this
+    caller asked for. The cold path gets the caller's cap through
+    `preexec_fn`; without this, the warm path silently ignored a smaller
+    one.
+
+    Only ever lowers. Raising a hard limit needs privileges we do not
+    have and should not want, so the existing hard limit is the ceiling.
+    Windows has no rlimits -- there the parent assigns a Job Object
+    instead.
+    """
+    if sys.platform == "win32" or not isinstance(memory_bytes, int):
+        return
+    import resource
+
+    for res in (resource.RLIMIT_AS, resource.RLIMIT_DATA):
+        try:
+            _soft, hard = resource.getrlimit(res)
+            target = memory_bytes
+            if hard != resource.RLIM_INFINITY:
+                target = min(target, hard)
+            resource.setrlimit(res, (target, target))
+        except (ValueError, OSError):
+            # A platform that will not honour it is a platform where this
+            # was never a guarantee; the wall-clock timeout still holds.
+            pass
 
 
 def main() -> None:

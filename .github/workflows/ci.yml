@@ -169,7 +169,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libosmesa6-dev libgl1 libglu1-mesa freeglut3-dev
-      - run: uv sync --all-extras --extra gpu
+        # `--all-extras` already includes `gpu`, and uv refuses the two
+        # together: "the argument '--all-extras' cannot be used with
+        # '--extra <EXTRA>'". The job never reached pytest.
+      - run: uv sync --all-extras
       - name: render via pyrender
         env:
           PYOPENGL_PLATFORM: osmesa

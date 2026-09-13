@@ -328,23 +328,88 @@ def test_memory_bomb_is_killed(tmp_session: Path) -> None:
     """
     start = time.monotonic()
     result = sandbox.run(
+        # cadquery first, so a payload that is *not* contained can still
+        # assign a valid result and report ok=true. The previous version
+        # ended `result = 1`, so an uncontained run failed the
+        # result-type check instead -- the exact shape of false pass the
+        # sandbox-audit skill exists to forbid.
+        "import cadquery as cq\n"
         "import numpy\n"
         "blocks = []\n"
-        "for _ in range(4000):\n"
-        "    blocks.append(numpy.zeros((1024, 1024, 32)))\n"
-        "result = 1",
+        # 12 x 256MB = 3GB against a 1.5GB cap. Each block is *touched*:
+        # numpy.zeros hands back lazily-mapped pages, and an allocation
+        # nothing ever reads costs no physical memory, so an untouched
+        # loop tests the allocator rather than the cap.
+        "for _ in range(12):\n"
+        "    block = numpy.zeros((1024, 1024, 32))\n"
+        "    block.fill(1.0)\n"
+        "    blocks.append(block)\n"
+        "result = cq.Workplane('XY').box(1, 1, 1)\n",
         tmp_session,
         timeout=120,
         memory_bytes=1536 * 1024 * 1024,
     )
     elapsed = time.monotonic() - start
 
-    assert not result.ok, "Memory bomb was not contained"
+    assert not result.ok, (
+        f"3GB was allocated and touched under a 1.5GB cap: the memory "
+        f"limit is not enforced here. {result.to_dict()}"
+    )
     assert result.error_type == "MemoryError", (
         f"Memory exhaustion should be reported as MemoryError, "
         f"got {result.to_dict()}"
     )
     assert elapsed < 100, "Cap was only enforced by the wall-clock timeout"
+
+
+@pytest.mark.slow
+@pytest.mark.serial
+def test_the_memory_cap_survives_worker_reuse(tmp_session: Path) -> None:
+    """The pre-warmed worker must be capped too.
+
+    `main()` calls `sandbox.prewarm()` at start-up, so a reused worker is
+    not an edge case -- it is the path every production execution takes.
+    It was also the path with no memory cap on it: the Job Object was
+    only ever assigned on the cold path, and Windows accepts a job
+    assignment onto an already-running process and then declines to
+    enforce it. This payload allocated and touched 4GB under a 2GB cap
+    and reported ok=true.
+
+    Deliberately uses the *default* cap rather than passing one, because
+    the default is what the server runs with.
+    """
+    sandbox.prewarm()
+    # prewarm starts the worker on a thread; give it the import.
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if sandbox.warm_worker.POOL._spare is not None:
+            break
+        time.sleep(0.5)
+    else:
+        pytest.skip("the warm worker never came up; nothing to assert")
+
+    result = sandbox.run(
+        # 16 x 256MB = 4GB against the 2GB default, every page touched.
+        "import cadquery as cq\n"
+        "import numpy\n"
+        "blocks = []\n"
+        "for _ in range(16):\n"
+        "    block = numpy.zeros((1024, 1024, 32))\n"
+        "    block.fill(1.0)\n"
+        "    blocks.append(block)\n"
+        "result = cq.Workplane('XY').box(1, 1, 1)\n",
+        tmp_session,
+        timeout=180,
+    )
+
+    assert not result.ok, (
+        f"a re-used warm worker allocated and touched 4GB under the "
+        f"{sandbox.DEFAULT_MEMORY_MB}MB default cap: the limit is not "
+        f"applied to pre-warmed workers. {result.to_dict()}"
+    )
+    assert result.error_type == "MemoryError", (
+        f"expected the memory cap to bite, got {result.to_dict()}"
+    )
 
 
 def _python_process_count() -> int:

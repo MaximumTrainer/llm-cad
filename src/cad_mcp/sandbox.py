@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -25,6 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from cad_mcp import warm_worker
+
+logger = logging.getLogger(__name__)
 
 _WORKER = Path(__file__).with_name("_sandbox_worker.py")
 
@@ -219,11 +222,37 @@ def _assign_windows_job(proc: subprocess.Popen[str], memory_bytes: int) -> Any:
         handle = kernel32.OpenProcess(
             PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, proc.pid
         )
-        if handle:
-            kernel32.AssignProcessToJobObject(job, handle)
-            kernel32.CloseHandle(handle)
+        if not handle:
+            logger.warning(
+                "sandbox: could not open worker %s to cap its memory "
+                "(error %s); this execution runs without the Windows "
+                "memory limit",
+                proc.pid,
+                ctypes.get_last_error(),
+            )
+            kernel32.CloseHandle(job)
+            return None
+
+        assigned = kernel32.AssignProcessToJobObject(job, handle)
+        kernel32.CloseHandle(handle)
+        if not assigned:
+            # Silence here is how the cap went missing on the warm path
+            # in the first place: the function returned a job handle
+            # whether or not the process was ever in it.
+            logger.warning(
+                "sandbox: could not assign worker %s to a job object "
+                "(error %s); this execution runs without the Windows "
+                "memory limit",
+                proc.pid,
+                ctypes.get_last_error(),
+            )
+            kernel32.CloseHandle(job)
+            return None
         return job
     except Exception:
+        logger.warning(
+            "sandbox: Windows job object setup failed", exc_info=True
+        )
         return None
 
 
@@ -304,6 +333,16 @@ def prewarm() -> None:
             ),
         )
 
+        # Cap it now, while it is newly created. Windows accepts an
+        # assignment to an already-running process and then does not
+        # enforce the limit on it -- measured: a warm worker assigned
+        # mid-life allocated and touched 3GB under a 1536MB cap. The
+        # cold path works precisely because it caps at birth, so the
+        # warm path does the same. The handle rides on the process
+        # because closing it kills the worker (KILL_ON_JOB_CLOSE).
+        job = _assign_windows_job(proc, DEFAULT_MEMORY_MB * 1024 * 1024)
+        proc._cad_windows_job = job  # type: ignore[attr-defined]
+
         assert proc.stderr is not None
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -367,7 +406,13 @@ def run(
     # the timeout below covers execution rather than start-up. It is
     # single-use: the interpreter and namespace are never reused for a
     # second job, so isolation is unchanged (CAD-014).
-    proc = warm_worker.POOL.take()
+    # On Unix the worker lowers its own rlimits from the job payload, so
+    # any cap can be honoured on a reused worker. On Windows it cannot:
+    # the job object is fixed at spawn with the default. A caller asking
+    # for something tighter therefore gets a cold worker rather than a
+    # silently weaker limit.
+    reusable = not _IS_WINDOWS or memory_bytes >= DEFAULT_MEMORY_MB * 1024 * 1024
+    proc = warm_worker.POOL.take() if reusable else None
     job_payload: str | None = None
     windows_job: Any = None
 
@@ -378,13 +423,25 @@ def run(
                 "code_path": str(code_file),
                 "brep_out": str(out_brep),
                 "result_out": str(out_result),
+                # A warm worker was spawned before this call existed, so
+                # it carries the *default* limits rather than this
+                # caller's. It lowers its own rlimits from this on Unix;
+                # on Windows the Job Object below does the same job from
+                # out here.
+                "memory_bytes": memory_bytes,
             }
         )
+        # The job this worker was created inside, so the finally below
+        # closes it and takes the process tree with it. Before the fix
+        # the warm path had no job at all, and since `main()` pre-warms
+        # on startup that was the path every production execution took.
+        windows_job = getattr(proc, "_cad_windows_job", None)
     else:
         proc = _spawn_worker(
             tmpdir, code_file, env, memory_bytes, max_file_bytes
         )
         windows_job = _assign_windows_job(proc, memory_bytes)
+        job_payload = None
 
     try:
         stdout, stderr = proc.communicate(job_payload, timeout=timeout)
