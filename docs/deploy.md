@@ -266,25 +266,72 @@ backend:
 
 | | measured | SPEC N2 budget |
 |---|---|---|
-| `render_views`, warm | 0.40s / 0.41s | ≤2s |
+| `render_views`, warm | n=20: median 0.31s, p90 0.37s, max 0.41s | ≤2s |
+| `execute_cad`, warm kernel | 0.52s | ≤5s |
 | `execute_cad`, cold kernel | 3.21s | ≤5s |
 | `validate_mesh` | 0.07s | ≤5s |
-| container start → `/health` 200 | 4–6s | — |
-| image size | 2.08 GB | — |
+| container start → `/health` ready | 13s | — |
+| image size | 2.09 GB | — |
 
-`scripts/smoke_remote.py --repeat 10` passes end to end: 401 without a
-token, all 14 SPEC 5.1 tools listed, 10/10 iterations returning a PNG
-render, and all four export formats written. N1 holds inside the
-container — network egress from user code blocked, writes outside the
-session directory denied with no file created, wall-clock timeout
-enforced.
+Render latency is quoted as p90 over twenty samples, not a worst case.
+A five-sample run on a host at 44% load threw one 5.09s outlier that
+twenty samples against the same container could not reproduce; the
+budget is about the warm steady state, and the maximum is quoted anyway
+rather than dropped.
+
+`scripts/smoke_remote.py --repeat 10` passes end to end against the
+container: `/health` ready and naming its backend, 401 without a token,
+all 14 SPEC 5.1 tools listed, 10/10 iterations returning a PNG render,
+and all four export formats written.
+
+N1 holds inside the container, asserted by effect rather than by error
+text: model code cannot open an outbound socket; a write to `/tmp`
+leaves no file anywhere on the filesystem (`find /` finds nothing); a
+non-terminating execution is killed at the wall-clock limit; two
+concurrent sessions see only their own parts; exports land only in
+`/data/output` and nothing is written into `/app`.
+
+### Affinity across two machines
+
+Two containers with distinct `FLY_MACHINE_ID`s exercise the entire
+routing decision without Fly:
+
+| step | result |
+|---|---|
+| initialize on A | id issued as `148e392a7d1685~056338…`, wrapped with A's id |
+| A's session presented to B | `409`, `fly-replay: instance=148e392a7d1685`, **not served** |
+| same, with `fly-replay-src` already set | `404` + JSON-RPC `-32600`, "re-initialize" — no loop, no 500 |
+| same, presented to A | `200`, all 14 tools |
+
+Reproduce it with `scripts/check_affinity.sh`, which the deploy
+workflow runs on every build:
+
+```bash
+docker run -d --name a -p 8101:8000 -e FLY_MACHINE_ID=148e392a7d1685 ... cad-mcp
+docker run -d --name b -p 8102:8000 -e FLY_MACHINE_ID=3d8d9214b44e83 ... cad-mcp
+
+scripts/check_affinity.sh \
+  http://127.0.0.1:8101 148e392a7d1685 \
+  http://127.0.0.1:8102 3d8d9214b44e83 <token>
+```
+
+Point both URLs at the same container and it fails, which is the only
+reason to believe it when it passes.
+
+What this cannot show is that Fly's proxy actually honours the header.
+That needs a real deployment and is the one part of the design still
+taken on trust.
 
 ## Status
 
-Not yet deployed. Everything above is built and verified against a local
-container; what needs a Fly account is the rest of issue #1's A1–A8 —
-latency and cold start *on the platform*, `fly-replay` proven with more
-than one machine actually running, and a rollback performed once. Until
-then, treat the Fly-specific numbers in this document as configuration
-intent rather than measurements. The routing logic itself is covered by
-`tests/test_fly_affinity.py`, which drives it as raw ASGI.
+Not yet deployed. Everything above is built and verified against local
+containers, including `fly-replay` routing across two of them with
+distinct machine ids.
+
+What still needs a Fly account: latency and cold start measured *on the
+platform* rather than on a laptop, confirmation that Fly's proxy honours
+the `fly-replay` header, cold start from a suspended machine, and a
+rollback performed once. Treat the Fly-specific numbers here as
+configuration intent until then. The routing logic is covered as raw
+ASGI by `tests/test_fly_affinity.py` and end to end by the two-container
+check above.

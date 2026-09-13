@@ -295,20 +295,45 @@ matplotlib backend), against the N2 budgets:
 
 | | measured | budget |
 |---|---|---|
-| `render_views`, warm | 0.40s / 0.41s | ≤2s |
+| `render_views`, warm | n=20: median 0.31s, p90 0.37s, max 0.41s | ≤2s |
+| `execute_cad`, warm kernel | 0.52s | ≤5s |
 | `execute_cad`, cold kernel | 3.21s | ≤5s |
 | `validate_mesh` | 0.07s | ≤5s |
-| container start → `/health` 200 | 4–6s | — |
+| container start → `/health` ready | 13s | — |
+| image size | 2.09 GB | — |
 
-N1's guarantees hold unchanged inside the container: network egress from
-user code blocked, writes outside the session directory denied with no
-file created, and the wall-clock timeout enforced. Exports go to a
-durable directory outside the session temp dir (G4).
+Render latency is judged on p90 across twenty samples rather than a
+worst case: a five-sample run on a host at 44% load produced one 5.09s
+outlier that twenty samples against the same container could not
+reproduce. The budget is about the warm steady state, and the maximum is
+reported either way rather than hidden.
+
+The 13s to readiness is longer than the port takes to open, and
+deliberately so — see H7. It is the honest number for *can serve*, where
+the old unconditional `/health` reported 4–6s for *is listening*.
+
+N1's guarantees hold unchanged inside the container, each asserted by
+effect rather than by the wording of an error: model code cannot open an
+outbound socket, a write outside the session directory leaves no file
+anywhere on the filesystem, and a non-terminating execution is killed at
+the wall-clock limit. Two concurrent sessions see only their own parts.
+Exports go to a durable directory outside the session temp dir (G4), and
+nothing is written into the application directory.
+
+**Affinity, verified across two machines.** Two containers with distinct
+`FLY_MACHINE_ID`s show the whole routing decision: the session id issued
+by A comes back wrapped as `<A>~<sdk-id>`; that id presented to B is
+*not* served but answered `409` with `fly-replay: instance=<A>`; the same
+id presented to B with `fly-replay-src` already set returns `404` and a
+JSON-RPC `-32600` telling the client to re-initialize, rather than
+looping or 500ing; and presented to A it is served normally. What this
+cannot show is that Fly's proxy honours the header — that needs a real
+deployment, and until then it is the one part of §10.4 taken on trust.
 
 Fly.io-specific configuration, the deploy workflow and the rollback
-procedure live in `docs/deploy.md`. Deployment to a real host, and
-therefore proof that `fly-replay` routes correctly across more than one
-machine, is not yet done.
+procedure live in `docs/deploy.md`. Nothing is deployed to a real host
+yet, so on-platform latency and cold start, and a rollback performed
+once, remain open.
 
 ## 11. v2+ backlog
 Parametric "tweak sliders" resource · STEP import + modify · multi-material 3MF · image-to-3D via Meshy `v1/image-to-3d` · undo/redo per part · assembly constraints solver (mate, align, offset).

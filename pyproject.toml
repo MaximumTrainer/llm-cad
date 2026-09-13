@@ -132,5 +132,9 @@ dev = [
     "pytest>=9.1.1",
     "pytest-anyio>=0.0.0",
     "pytest-xdist>=3.8.0",
+    # tests/test_workflows_parse.py parses the Actions workflows. It
+    # arrives transitively today; CONTRIBUTING is explicit that what we
+    # import, we declare.
+    "pyyaml>=6.0",
     "ruff>=0.16.5",
 ]

@@ -291,6 +291,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-anyio" },
     { name = "pytest-xdist" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
@@ -324,6 +325,7 @@ dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-anyio", specifier = ">=0.0.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.16.5" },
 ]
 

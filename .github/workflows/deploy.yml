@@ -82,7 +82,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: record image size
-        run: docker image inspect cad-mcp:ci --format '{{.Size}}' | awk '{printf "image size: %.2f GB\n", $1/1024/1024/1024}'
+        # Block scalar, not a plain one: the awk format string contains
+        # ": ", which YAML reads as a mapping and refuses.
+        run: |
+          docker image inspect cad-mcp:ci --format '{{.Size}}' \
+            | awk '{printf "image size: %.2f GB\n", $1/1024/1024/1024}'
       - name: run it
         run: |
           docker run -d --name cad-mcp \
@@ -108,8 +112,27 @@ jobs:
         run: curl -fsS http://127.0.0.1:8000/health
       - name: remote smoke (the full core loop over HTTP)
         run: uv run --with mcp python scripts/smoke_remote.py --url http://127.0.0.1:8000 --token ci-smoke-token --repeat 3
+      # FLY-3 wants affinity proven with more than one machine running.
+      # Two containers with distinct FLY_MACHINE_IDs exercise every branch
+      # of the routing decision against a real server. Only Fly's proxy
+      # honouring the header is left to the deployment itself.
+      - name: session affinity across two machines (FLY-3)
+        run: |
+          for spec in "a 8101 148e392a7d1685" "b 8102 3d8d9214b44e83"; do
+            set -- $spec
+            docker run -d --name "cad-mcp-$1" -p "$2:8000"               -e FLY_MACHINE_ID="$3"               -e CAD_MCP_AUTH_TOKEN=ci-smoke-token               -e CAD_MCP_PUBLIC_URL="http://127.0.0.1:$2"               -e CAD_MCP_ALLOWED_HOSTS="127.0.0.1:$2,localhost:$2"               cad-mcp:ci
+          done
+          for port in 8101 8102; do
+            for i in $(seq 1 120); do
+              curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1 && break
+              sleep 1
+            done
+          done
+          bash scripts/check_affinity.sh             http://127.0.0.1:8101 148e392a7d1685             http://127.0.0.1:8102 3d8d9214b44e83 ci-smoke-token
       - if: always()
-        run: docker logs cad-mcp 2>&1 | tail -100
+        run: |
+          docker logs cad-mcp 2>&1 | tail -100
+          for n in a b; do docker logs "cad-mcp-$n" 2>&1 | tail -30 || true; done
 
   # Everything below needs Fly credentials. Gated on an environment so a
   # fork PR cannot reach the token.
