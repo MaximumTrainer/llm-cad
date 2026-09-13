@@ -378,10 +378,12 @@ def run(
             hint="Simplify the model or break it into smaller steps.",
         )
     finally:
-        # `sys.platform` rather than a module-level flag, so mypy narrows
-        # and does not look for ctypes.WinDLL on Linux — which is exactly
-        # what CI caught on its first run.
-        if windows_job is not None and sys.platform == "win32":
+        # The platform test has to come *first*. mypy only narrows
+        # `sys.platform` when it leads the condition, so with the
+        # `windows_job is not None` term in front it still looked for
+        # ctypes.WinDLL on Linux and failed the Linux job — which is how
+        # main came to be red.
+        if sys.platform == "win32" and windows_job is not None:
             import ctypes
 
             ctypes.WinDLL("kernel32").CloseHandle(windows_job)

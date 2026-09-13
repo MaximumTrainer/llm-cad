@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -114,6 +115,58 @@ def test_writes_inside_session_dir_still_work(tmp_session: Path) -> None:
     result = run("open('scratch.txt', 'w').write('fine')", tmp_session)
     assert result.ok, f"Legitimate in-session write was blocked: {result.message}"
     assert (tmp_session / "scratch.txt").read_text() == "fine"
+
+
+def test_the_path_guard_does_not_re_enter_itself(tmp_path: Path) -> None:
+    """The guard must not be broken by the functions it guards.
+
+    `os.path.realpath` is pure Python on POSIX and resolves a path by
+    calling `os.lstat` and `os.readlink` -- both of which the guard
+    wraps. Without a re-entrancy flag each check resolves a path that
+    triggers another check, and the interpreter dies with RecursionError
+    before any policy decision is ever reached.
+
+    Every sandboxed execution on Linux and macOS failed this way, and the
+    containment tests still "passed" because a crash is also a refusal --
+    precisely the trap the sandbox-audit skill warns about: "denied" and
+    "the guard never ran" look identical from outside. Measured in a
+    container, pre-fix: a write *inside* the session directory, which
+    must succeed, failed with RecursionError. Windows was unaffected, and
+    was the only platform CI had ever managed to run.
+
+    `realpath` is stubbed with a POSIX-shaped one -- resolve by calling
+    `os.lstat` -- so this exercises the invariant on every platform
+    rather than passing vacuously on the one where the real `realpath` is
+    a single C call.
+    """
+    import os.path as osp
+
+    from cad_mcp._sandbox_policy import _PathPolicy
+
+    policy = _PathPolicy(str(tmp_path))
+    target = tmp_path / "a" / "b" / "c.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("x")
+
+    real_lstat = os.lstat
+    lstat_calls: list[str] = []
+
+    def guarded_lstat(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # What install_path_guard wraps os.lstat with.
+        lstat_calls.append(str(path))
+        policy.check(path, write=False)
+        return real_lstat(path, *args, **kwargs)
+
+    def posix_shaped_realpath(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        os.lstat(path)  # the guarded one, as posixpath would reach it
+        return str(path)
+
+    with mock.patch.object(os, "lstat", guarded_lstat), mock.patch.object(
+        osp, "realpath", posix_shaped_realpath
+    ):
+        policy.check(target, write=True)  # must not raise RecursionError
+
+    assert lstat_calls, "the re-entrant path was never exercised"
 
 
 # ------------------------------------------------------------------
