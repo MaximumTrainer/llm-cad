@@ -362,11 +362,17 @@ def prewarm() -> None:
 def _kill_tree(proc: subprocess.Popen[str]) -> None:
     """Kill the child and everything it spawned."""
     if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            capture_output=True,
-            check=False,
-        )
+        # Bounded. This runs on the timeout path, so the caller is
+        # already past its deadline; an unbounded wait here turns a 30s
+        # limit into an open-ended one, and proc.kill() below is the
+        # fallback that does not depend on an external binary.
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
     else:
         import signal
 
