@@ -71,7 +71,7 @@
       <div class="feature-card">
         <div class="card-icon">🔒</div>
         <h3>Sandboxed Execution</h3>
-        <p>CadQuery code runs in an isolated subprocess with 30-second timeout, no network access, and restricted imports. Safe by design.</p>
+        <p>Model code runs in a subprocess with a 30-second wall-clock timeout, a memory cap, no network, and writes confined to the session directory. A barrier against accidents and casual misuse &mdash; not a jail for deliberately hostile code, so put OS-level isolation around it before exposing it to untrusted prompts.</p>
       </div>
 
       <div class="feature-card">
@@ -129,7 +129,7 @@
 <section id="tools">
   <div class="container">
     <h2>Tools</h2>
-    <p class="section-sub">13 MCP tools the LLM calls to design, validate, and export models.</p>
+    <p class="section-sub">14 MCP tools the LLM calls to design, validate, and export models.</p>
 
     <div style="overflow-x: auto;">
       <table class="tools-table">
@@ -206,6 +206,11 @@
             <td>Clear all state and start fresh.</td>
             <td><span class="tag">Session</span></td>
           </tr>
+          <tr>
+            <td><code>ping</code></td>
+            <td>Liveness check. Answers from the server process, so it confirms the server survived a kernel fault.</td>
+            <td><span class="tag">Session</span></td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -231,6 +236,7 @@
         <h3>Resources</h3>
         <ul style="color: var(--text-muted); font-size: 0.95rem; padding-left: 1.25rem;">
           <li><code>cad://session/current/code</code> &mdash; Current model source code</li>
+          <li><code>cad://examples</code> &mdash; Index of the curated examples, one line each</li>
           <li><code>cad://examples/{name}</code> &mdash; Curated examples: bracket, enclosure, flange, pipe_clamp, phone_stand, threaded_cap, gear, desk_organizer</li>
         </ul>
       </div>

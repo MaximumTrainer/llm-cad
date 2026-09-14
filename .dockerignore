@@ -13,7 +13,6 @@ cad-mcp-output
 docs
 tests
 scripts/refresh_goldens.py
-BACKLOG.md
 PLAN.md
 .claude
 .githooks
