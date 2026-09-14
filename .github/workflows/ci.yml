@@ -84,14 +84,22 @@ jobs:
   # in two separate processes (that part is a blocking gate); this compares
   # the results between operating systems.
   #
-  # Informational on purpose, for now. OCCT tessellation is IEEE-754
-  # arithmetic through libm, and `macos-latest` is arm64 while the other
-  # runners are x86-64, so a last-ulp difference in a sin/cos used to
-  # discretise a fillet would change a vertex and therefore every byte
-  # downstream. That is a real possibility that has not been measured, and
-  # asserting it before measuring it would just paint the build red.
-  # Promote to a required check — and tighten SPEC N4 — once this job has
-  # been observed green across the matrix.
+  # Measured 2026-09-14, which settles the question this job was left open
+  # to answer: STEP is byte-identical across ubuntu/macos/windows, and
+  # STL, 3MF and GLB are not. OCCT tessellation is IEEE-754 arithmetic
+  # through libm and `macos-latest` is arm64 while the other runners are
+  # x86-64, so a last-ulp difference in a sin/cos used to discretise a
+  # fillet moves a vertex and every byte downstream. Exactly that.
+  #
+  # So SPEC N4 is not tightened, and this does not get promoted to a
+  # required check. N4 promises byte-identical exports "across separate
+  # processes on a given platform" -- the per-platform half is a blocking
+  # gate in each `test` job -- and it never promised cross-OS identity.
+  # This used to exit 1 claiming "SPEC N4 violated", putting a red X on
+  # every PR for a guarantee nobody made. It now asserts the measured
+  # state in both directions instead: STEP regressing fails, and a mesh
+  # format unexpectedly agreeing raises a notice, since that would be the
+  # trigger to revisit N4.
   determinism-cross-os:
     name: determinism (cross-OS, informational)
     needs: test
@@ -102,10 +110,26 @@ jobs:
         with:
           pattern: determinism-*
           merge-multiple: false
-      - name: every OS must agree, format by format
+      - name: compare the export hashes across platforms
         run: |
           python - <<'PY'
           import json, pathlib, sys
+
+          # STEP is byte-identical across OSes; the mesh formats are not.
+          # Measured 2026-09-14 across ubuntu/macos/windows runners.
+          #
+          # That is NOT a SPEC N4 violation: N4 promises byte-identical
+          # exports "across separate processes on a given platform", and
+          # this job used to exit 1 claiming otherwise, which put a red X
+          # on every PR for a guarantee nobody made. Tessellation runs
+          # through libm; a last-ulp difference in a sin/cos used to
+          # discretise a fillet moves a vertex and every byte downstream.
+          #
+          # So it asserts the *known* state in both directions: STEP
+          # regressing is a failure, and the mesh formats unexpectedly
+          # agreeing is worth knowing, because that is the trigger to
+          # tighten N4 and promote this to a required check.
+          CROSS_OS_STABLE = {"step"}
 
           runs = {}
           for path in sorted(pathlib.Path(".").glob("determinism-*/*.json")):
@@ -115,20 +139,33 @@ jobs:
               sys.exit(f"expected >=2 platforms, got {sorted(runs)}")
 
           formats = sorted(next(iter(runs.values())))
-          failed = []
+          regressed, newly_stable = [], []
           for fmt in formats:
               seen = {os_name: h[fmt] for os_name, h in runs.items()}
-              unique = set(seen.values())
-              status = "ok" if len(unique) == 1 else "DIFFERS"
-              print(f"{fmt:5} {status}")
-              if len(unique) != 1:
-                  failed.append(fmt)
+              identical = len(set(seen.values())) == 1
+              expected = fmt in CROSS_OS_STABLE
+              print(f"{fmt:5} {'identical' if identical else 'DIFFERS'}"
+                    f"{'' if identical == expected else '  <-- CHANGED'}")
+              if not identical:
                   for os_name, digest in sorted(seen.items()):
                       print(f"      {os_name:24} {digest}")
+              if expected and not identical:
+                  regressed.append(fmt)
+              if identical and not expected:
+                  newly_stable.append(fmt)
 
-          if failed:
-              sys.exit(f"SPEC N4 violated across platforms: {failed}")
-          print(f"all {len(formats)} formats byte-identical across {sorted(runs)}")
+          if newly_stable:
+              print()
+              print(f"::notice::{sorted(newly_stable)} are now byte-identical "
+                    f"across platforms. Consider tightening SPEC N4 and adding "
+                    f"them to CROSS_OS_STABLE.")
+          if regressed:
+              sys.exit(
+                  f"{sorted(regressed)} used to be byte-identical across "
+                  f"platforms and no longer is -- SPEC N4 relies on it"
+              )
+          print()
+          print("cross-OS state matches what SPEC N4 claims")
           PY
 
   # PLAN Phase 2 gate: the matplotlib fallback must work where EGL is absent.
