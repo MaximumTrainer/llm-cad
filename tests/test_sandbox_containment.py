@@ -35,6 +35,50 @@ import pytest
 
 from cad_mcp import sandbox
 
+#: macOS accepts RLIMIT_AS/RLIMIT_DATA, reports them set, and then does
+#: not apply them (SPEC N1). Measured on a CI runner: 4GB allocated and
+#: touched under a 2GB cap, ran to completion.
+#:
+#: `xfail(strict=True)` rather than `skipif` on purpose. The test still
+#: runs, so the day Darwin starts enforcing this the unexpected pass is
+#: a *failure* and someone has to come back and correct SPEC N1. A skip
+#: would sit there being quietly true forever.
+#: 12 x 128MB = 1.5GB, and every page is *touched*: numpy.zeros hands
+#: back lazily-mapped pages, and an allocation nothing ever reads costs
+#: no physical memory, so an untouched loop measures the allocator rather
+#: than the cap. Sized to trip a 1536MB cap a few hundred MB in -- an
+#: earlier version touched 3-4GB, which on a machine with 2.2GB free
+#: paged to disk and turned a 3s test into a two-hour one.
+MEMORY_BOMB = (
+    "import cadquery as cq\n"
+    "import numpy\n"
+    "blocks = []\n"
+    "for _ in range(12):\n"
+    "    block = numpy.zeros((1024, 1024, 16))\n"
+    "    block.fill(1.0)\n"
+    "    blocks.append(block)\n"
+    # A valid result, so a payload that is NOT contained reports ok=true
+    # rather than failing the result-type check and looking contained.
+    "result = cq.Workplane('XY').box(1, 1, 1)\n"
+)
+
+#: Below this the worker dies importing CadQuery instead of running the
+#: payload -- OCCT reserves a lot of address space, and on Linux a 1200MB
+#: cap yields SandboxError at import rather than MemoryError at the
+#: allocation. Measured: 1536MB trips in ~3s on Windows and Linux alike.
+MEMORY_CAP_MB = 1536
+
+
+darwin_memory_cap_unenforced = pytest.mark.xfail(
+    sys.platform == "darwin",
+    reason=(
+        "SPEC N1: Darwin does not enforce RLIMIT_AS/RLIMIT_DATA; on macOS "
+        "the hard guarantees are the wall-clock timeout and the "
+        "process-group kill"
+    ),
+    strict=True,
+)
+
 # Builds real geometry, so each test pays a sandbox subprocess.
 # Deselect with -m "not geometry" for fast feedback (CAD-025).
 pytestmark = pytest.mark.geometry
@@ -317,43 +361,27 @@ def test_timeout_kills_grandchildren(tmp_session: Path) -> None:
 
 # Allocating 1.5GB while eleven other workers each hold a resident
 # CadQuery is how you measure the machine, not the memory cap.
+@darwin_memory_cap_unenforced
 @pytest.mark.slow
 @pytest.mark.serial
 def test_memory_bomb_is_killed(tmp_session: Path) -> None:
-    """A runaway allocation must be stopped on every platform.
+    """A runaway allocation must be stopped where the cap is enforced.
 
-    The cap has to sit above CadQuery's own import footprint (~600MB) or
-    the worker dies before it can report anything useful; 1.5GB leaves
-    headroom while still being reachable in a couple of seconds.
+    Linux and Windows, that is -- see the xfail above and SPEC N1 for
+    why macOS is not on that list.
     """
     start = time.monotonic()
     result = sandbox.run(
-        # cadquery first, so a payload that is *not* contained can still
-        # assign a valid result and report ok=true. The previous version
-        # ended `result = 1`, so an uncontained run failed the
-        # result-type check instead -- the exact shape of false pass the
-        # sandbox-audit skill exists to forbid.
-        "import cadquery as cq\n"
-        "import numpy\n"
-        "blocks = []\n"
-        # 12 x 256MB = 3GB against a 1.5GB cap. Each block is *touched*:
-        # numpy.zeros hands back lazily-mapped pages, and an allocation
-        # nothing ever reads costs no physical memory, so an untouched
-        # loop tests the allocator rather than the cap.
-        "for _ in range(12):\n"
-        "    block = numpy.zeros((1024, 1024, 32))\n"
-        "    block.fill(1.0)\n"
-        "    blocks.append(block)\n"
-        "result = cq.Workplane('XY').box(1, 1, 1)\n",
+        MEMORY_BOMB,
         tmp_session,
         timeout=120,
-        memory_bytes=1536 * 1024 * 1024,
+        memory_bytes=MEMORY_CAP_MB * 1024 * 1024,
     )
     elapsed = time.monotonic() - start
 
     assert not result.ok, (
-        f"3GB was allocated and touched under a 1.5GB cap: the memory "
-        f"limit is not enforced here. {result.to_dict()}"
+        f"1.5GB was allocated and touched under a {MEMORY_CAP_MB}MB cap: "
+        f"the memory limit is not enforced here. {result.to_dict()}"
     )
     assert result.error_type == "MemoryError", (
         f"Memory exhaustion should be reported as MemoryError, "
@@ -362,9 +390,12 @@ def test_memory_bomb_is_killed(tmp_session: Path) -> None:
     assert elapsed < 100, "Cap was only enforced by the wall-clock timeout"
 
 
+@darwin_memory_cap_unenforced
 @pytest.mark.slow
 @pytest.mark.serial
-def test_the_memory_cap_survives_worker_reuse(tmp_session: Path) -> None:
+def test_the_memory_cap_survives_worker_reuse(
+    tmp_session: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The pre-warmed worker must be capped too.
 
     `main()` calls `sandbox.prewarm()` at start-up, so a reused worker is
@@ -372,14 +403,18 @@ def test_the_memory_cap_survives_worker_reuse(tmp_session: Path) -> None:
     It was also the path with no memory cap on it: the Job Object was
     only ever assigned on the cold path, and Windows accepts a job
     assignment onto an already-running process and then declines to
-    enforce it. This payload allocated and touched 4GB under a 2GB cap
-    and reported ok=true.
+    enforce it. Verified against the unfixed code, this payload ran to
+    completion and reported ok=true.
 
-    Deliberately uses the *default* cap rather than passing one, because
-    the default is what the server runs with.
+    The *default* cap is what matters here, because the default is what
+    the server runs with -- so rather than pass one, this lowers the
+    default and restarts the spare, which is the same code path
+    start-up takes.
     """
+    sandbox.warm_worker.POOL.shutdown()
+    monkeypatch.setattr(sandbox, "DEFAULT_MEMORY_MB", MEMORY_CAP_MB)
     sandbox.prewarm()
-    # prewarm starts the worker on a thread; give it the import.
+
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         if sandbox.warm_worker.POOL._spare is not None:
@@ -388,24 +423,13 @@ def test_the_memory_cap_survives_worker_reuse(tmp_session: Path) -> None:
     else:
         pytest.skip("the warm worker never came up; nothing to assert")
 
-    result = sandbox.run(
-        # 16 x 256MB = 4GB against the 2GB default, every page touched.
-        "import cadquery as cq\n"
-        "import numpy\n"
-        "blocks = []\n"
-        "for _ in range(16):\n"
-        "    block = numpy.zeros((1024, 1024, 32))\n"
-        "    block.fill(1.0)\n"
-        "    blocks.append(block)\n"
-        "result = cq.Workplane('XY').box(1, 1, 1)\n",
-        tmp_session,
-        timeout=180,
-    )
+    # No memory_bytes: this must be the default the spare was born with.
+    result = sandbox.run(MEMORY_BOMB, tmp_session, timeout=120)
 
     assert not result.ok, (
-        f"a re-used warm worker allocated and touched 4GB under the "
-        f"{sandbox.DEFAULT_MEMORY_MB}MB default cap: the limit is not "
-        f"applied to pre-warmed workers. {result.to_dict()}"
+        f"a re-used warm worker allocated and touched 1.5GB under the "
+        f"{MEMORY_CAP_MB}MB default cap: the limit is not applied to "
+        f"pre-warmed workers. {result.to_dict()}"
     )
     assert result.error_type == "MemoryError", (
         f"expected the memory cap to bite, got {result.to_dict()}"
