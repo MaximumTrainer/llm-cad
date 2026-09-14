@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -55,11 +56,7 @@ def glb_to_brep(glb_path: Path, brep_path: Path) -> dict[str, Any]:
             len(mesh.faces),
         )
 
-    shape = _sew_mesh(mesh.vertices, mesh.faces)
-
-    from OCP.BRepTools import BRepTools
-
-    BRepTools.Write_s(shape, str(brep_path))
+    _sew_mesh(mesh.vertices, mesh.faces, brep_path)
 
     lo = mesh.bounds[0]
     hi = mesh.bounds[1]
@@ -108,25 +105,29 @@ def _decimate(mesh: Any, target_faces: int) -> Any:
 def _sew_mesh(
     vertices: np.ndarray[Any, np.dtype[np.floating[Any]]],
     faces: np.ndarray[Any, np.dtype[np.integer[Any]]],
-) -> Any:
-    """Build an OCP shape by sewing triangular faces."""
-    from OCP.BRepBuilderAPI import (
-        BRepBuilderAPI_MakeFace,
-        BRepBuilderAPI_MakePolygon,
-        BRepBuilderAPI_Sewing,
-    )
-    from OCP.gp import gp_Pnt
+    brep_out: Path,
+) -> None:
+    """Sew triangles into a shell and write it, in the geometry worker.
 
-    sew = BRepBuilderAPI_Sewing(1e-3)
+    Sewing tens of thousands of faces is the heaviest OCCT call the
+    server makes and the one most likely to be handed degenerate input,
+    since the triangles come from a generative model rather than from a
+    kernel. It runs out of process for that reason (issue #10), and the
+    result is persisted there rather than returned, because a
+    TopoDS_Shape cannot cross a process boundary.
+    """
+    from cad_mcp import geometry
 
-    for tri in faces:
-        pts = [
-            gp_Pnt(float(vertices[i][0]), float(vertices[i][1]), float(vertices[i][2]))
-            for i in tri
-        ]
-        wire = BRepBuilderAPI_MakePolygon(pts[0], pts[1], pts[2], True).Wire()
-        face = BRepBuilderAPI_MakeFace(wire, True).Face()
-        sew.Add(face)
+    with tempfile.TemporaryDirectory(prefix="cad-sew-") as tmp:
+        mesh_path = Path(tmp) / "mesh.npz"
+        np.savez(
+            mesh_path,
+            verts=np.asarray(vertices, dtype=np.float64),
+            faces=np.asarray(faces, dtype=np.int32),
+        )
+        geometry.call(
+            "sew_mesh",
+            mesh_path=str(mesh_path),
+            brep_out=str(brep_out),
+        )
 
-    sew.Perform()
-    return sew.SewedShape()

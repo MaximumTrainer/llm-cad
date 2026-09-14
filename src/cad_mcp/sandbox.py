@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -26,12 +27,35 @@ from typing import Any
 
 from cad_mcp import warm_worker
 
+logger = logging.getLogger(__name__)
+
 _WORKER = Path(__file__).with_name("_sandbox_worker.py")
 
 DEFAULT_TIMEOUT_S = int(os.environ.get("CAD_MCP_SANDBOX_TIMEOUT_S") or 30)
 DEFAULT_MEMORY_MB = int(os.environ.get("CAD_MCP_SANDBOX_MEM_MB") or 2048)
 DEFAULT_MAX_FILE_MB = int(os.environ.get("CAD_MCP_SANDBOX_FILE_MB") or 512)
-DEFAULT_MAX_PROCS = int(os.environ.get("CAD_MCP_SANDBOX_MAX_PROCS") or 64)
+def _default_max_procs() -> int:
+    """A fork-bomb brake that scales with the machine.
+
+    `RLIMIT_NPROC` on Linux is per *real UID* and counts **threads**, not
+    just processes, so it is a much blunter instrument than its name
+    suggests. The old flat 64 was below what a legitimate CadQuery import
+    needs: NumPy/OpenBLAS and OCCT each start a pool sized from the CPU
+    count, and in a container on a 12-core host the worker died during
+    `import numpy` with rc=-2 before it ran a line of user code. Measured
+    there: 64 fails, 128 and above succeed.
+
+    So it scales with the CPU count and keeps real headroom. It is still
+    a brake -- it stops runaway spawning long before it can exhaust the
+    host -- but the per-execution guarantees that actually matter are the
+    wall-clock timeout, the memory cap and the process-group kill.
+    """
+    return max(256, (os.cpu_count() or 4) * 32)
+
+
+DEFAULT_MAX_PROCS = int(
+    os.environ.get("CAD_MCP_SANDBOX_MAX_PROCS") or _default_max_procs()
+)
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -198,11 +222,37 @@ def _assign_windows_job(proc: subprocess.Popen[str], memory_bytes: int) -> Any:
         handle = kernel32.OpenProcess(
             PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, proc.pid
         )
-        if handle:
-            kernel32.AssignProcessToJobObject(job, handle)
-            kernel32.CloseHandle(handle)
+        if not handle:
+            logger.warning(
+                "sandbox: could not open worker %s to cap its memory "
+                "(error %s); this execution runs without the Windows "
+                "memory limit",
+                proc.pid,
+                ctypes.get_last_error(),
+            )
+            kernel32.CloseHandle(job)
+            return None
+
+        assigned = kernel32.AssignProcessToJobObject(job, handle)
+        kernel32.CloseHandle(handle)
+        if not assigned:
+            # Silence here is how the cap went missing on the warm path
+            # in the first place: the function returned a job handle
+            # whether or not the process was ever in it.
+            logger.warning(
+                "sandbox: could not assign worker %s to a job object "
+                "(error %s); this execution runs without the Windows "
+                "memory limit",
+                proc.pid,
+                ctypes.get_last_error(),
+            )
+            kernel32.CloseHandle(job)
+            return None
         return job
     except Exception:
+        logger.warning(
+            "sandbox: Windows job object setup failed", exc_info=True
+        )
         return None
 
 
@@ -283,6 +333,16 @@ def prewarm() -> None:
             ),
         )
 
+        # Cap it now, while it is newly created. Windows accepts an
+        # assignment to an already-running process and then does not
+        # enforce the limit on it -- measured: a warm worker assigned
+        # mid-life allocated and touched 3GB under a 1536MB cap. The
+        # cold path works precisely because it caps at birth, so the
+        # warm path does the same. The handle rides on the process
+        # because closing it kills the worker (KILL_ON_JOB_CLOSE).
+        job = _assign_windows_job(proc, DEFAULT_MEMORY_MB * 1024 * 1024)
+        proc._cad_windows_job = job  # type: ignore[attr-defined]
+
         assert proc.stderr is not None
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -302,11 +362,17 @@ def prewarm() -> None:
 def _kill_tree(proc: subprocess.Popen[str]) -> None:
     """Kill the child and everything it spawned."""
     if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            capture_output=True,
-            check=False,
-        )
+        # Bounded. This runs on the timeout path, so the caller is
+        # already past its deadline; an unbounded wait here turns a 30s
+        # limit into an open-ended one, and proc.kill() below is the
+        # fallback that does not depend on an external binary.
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
     else:
         import signal
 
@@ -346,7 +412,13 @@ def run(
     # the timeout below covers execution rather than start-up. It is
     # single-use: the interpreter and namespace are never reused for a
     # second job, so isolation is unchanged (CAD-014).
-    proc = warm_worker.POOL.take()
+    # On Unix the worker lowers its own rlimits from the job payload, so
+    # any cap can be honoured on a reused worker. On Windows it cannot:
+    # the job object is fixed at spawn with the default. A caller asking
+    # for something tighter therefore gets a cold worker rather than a
+    # silently weaker limit.
+    reusable = not _IS_WINDOWS or memory_bytes >= DEFAULT_MEMORY_MB * 1024 * 1024
+    proc = warm_worker.POOL.take() if reusable else None
     job_payload: str | None = None
     windows_job: Any = None
 
@@ -357,13 +429,25 @@ def run(
                 "code_path": str(code_file),
                 "brep_out": str(out_brep),
                 "result_out": str(out_result),
+                # A warm worker was spawned before this call existed, so
+                # it carries the *default* limits rather than this
+                # caller's. It lowers its own rlimits from this on Unix;
+                # on Windows the Job Object below does the same job from
+                # out here.
+                "memory_bytes": memory_bytes,
             }
         )
+        # The job this worker was created inside, so the finally below
+        # closes it and takes the process tree with it. Before the fix
+        # the warm path had no job at all, and since `main()` pre-warms
+        # on startup that was the path every production execution took.
+        windows_job = getattr(proc, "_cad_windows_job", None)
     else:
         proc = _spawn_worker(
             tmpdir, code_file, env, memory_bytes, max_file_bytes
         )
         windows_job = _assign_windows_job(proc, memory_bytes)
+        job_payload = None
 
     try:
         stdout, stderr = proc.communicate(job_payload, timeout=timeout)
@@ -378,7 +462,12 @@ def run(
             hint="Simplify the model or break it into smaller steps.",
         )
     finally:
-        if windows_job is not None:
+        # The platform test has to come *first*. mypy only narrows
+        # `sys.platform` when it leads the condition, so with the
+        # `windows_job is not None` term in front it still looked for
+        # ctypes.WinDLL on Linux and failed the Linux job — which is how
+        # main came to be red.
+        if sys.platform == "win32" and windows_job is not None:
             import ctypes
 
             ctypes.WinDLL("kernel32").CloseHandle(windows_job)

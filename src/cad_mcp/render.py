@@ -128,6 +128,22 @@ def active_backend() -> str:
     return "pyrender" if _check_pyrender() else "matplotlib"
 
 
+def known_backend() -> str | None:
+    """The backend, if it has already been determined; otherwise None.
+
+    `active_backend` settles the question by building a throwaway EGL
+    context, which is the wrong thing to do inside `/health`: it is slow
+    on first call and it runs on the event loop. `main()` settles it
+    during pre-warm, so by the time the server reports ready this
+    answers without probing.
+    """
+    if forced_backend() == "matplotlib":
+        return "matplotlib"
+    if _HAS_PYRENDER is None:
+        return None
+    return "pyrender" if _HAS_PYRENDER else "matplotlib"
+
+
 def grid_shape(n_views: int) -> tuple[int, int]:
     """(rows, cols) for *n_views* cells, shared by both backends.
 
@@ -222,26 +238,17 @@ def load_and_tessellate(
 
     Returns ``(vertices, faces)`` where *vertices* is *(N, 3)* float64
     and *faces* is *(M, 3)* int32 triangle indices.
+
+    The tessellation itself happens in the isolated geometry worker, not
+    here: OCCT meshing a degenerate face is a segfault, and taking the
+    server down mid-conversation is not a failure mode the LLM can do
+    anything with (issue #10, SPEC §7). Results are cached per B-rep and
+    tolerance, so render, validate and export of one shape pay for one
+    tessellation between them rather than three.
     """
-    import cadquery as cq
-    from OCP.BRep import BRep_Builder
-    from OCP.BRepTools import BRepTools
-    from OCP.TopoDS import TopoDS_Shape
+    from cad_mcp import geometry
 
-    ocp_shape = TopoDS_Shape()
-    builder = BRep_Builder()
-    if not BRepTools.Read_s(ocp_shape, str(brep_path), builder):
-        msg = f"Failed to read BREP: {brep_path}"
-        raise ValueError(msg)
-
-    shape = cq.Shape(ocp_shape)
-    raw_verts, raw_faces = shape.tessellate(tolerance, angular_tolerance)
-
-    verts = np.array(
-        [(v.x, v.y, v.z) for v in raw_verts], dtype=np.float64
-    )
-    faces = np.array(raw_faces, dtype=np.int32)
-    return verts, faces
+    return geometry.tessellate(brep_path, tolerance, angular_tolerance)
 
 
 # ------------------------------------------------------------------

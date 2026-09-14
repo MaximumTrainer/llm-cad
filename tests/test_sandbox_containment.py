@@ -29,10 +29,55 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from cad_mcp import sandbox
+
+#: macOS accepts RLIMIT_AS/RLIMIT_DATA, reports them set, and then does
+#: not apply them (SPEC N1). Measured on a CI runner: 4GB allocated and
+#: touched under a 2GB cap, ran to completion.
+#:
+#: `xfail(strict=True)` rather than `skipif` on purpose. The test still
+#: runs, so the day Darwin starts enforcing this the unexpected pass is
+#: a *failure* and someone has to come back and correct SPEC N1. A skip
+#: would sit there being quietly true forever.
+#: 12 x 128MB = 1.5GB, and every page is *touched*: numpy.zeros hands
+#: back lazily-mapped pages, and an allocation nothing ever reads costs
+#: no physical memory, so an untouched loop measures the allocator rather
+#: than the cap. Sized to trip a 1536MB cap a few hundred MB in -- an
+#: earlier version touched 3-4GB, which on a machine with 2.2GB free
+#: paged to disk and turned a 3s test into a two-hour one.
+MEMORY_BOMB = (
+    "import cadquery as cq\n"
+    "import numpy\n"
+    "blocks = []\n"
+    "for _ in range(12):\n"
+    "    block = numpy.zeros((1024, 1024, 16))\n"
+    "    block.fill(1.0)\n"
+    "    blocks.append(block)\n"
+    # A valid result, so a payload that is NOT contained reports ok=true
+    # rather than failing the result-type check and looking contained.
+    "result = cq.Workplane('XY').box(1, 1, 1)\n"
+)
+
+#: Below this the worker dies importing CadQuery instead of running the
+#: payload -- OCCT reserves a lot of address space, and on Linux a 1200MB
+#: cap yields SandboxError at import rather than MemoryError at the
+#: allocation. Measured: 1536MB trips in ~3s on Windows and Linux alike.
+MEMORY_CAP_MB = 1536
+
+
+darwin_memory_cap_unenforced = pytest.mark.xfail(
+    sys.platform == "darwin",
+    reason=(
+        "SPEC N1: Darwin does not enforce RLIMIT_AS/RLIMIT_DATA; on macOS "
+        "the hard guarantees are the wall-clock timeout and the "
+        "process-group kill"
+    ),
+    strict=True,
+)
 
 # Builds real geometry, so each test pays a sandbox subprocess.
 # Deselect with -m "not geometry" for fast feedback (CAD-025).
@@ -114,6 +159,58 @@ def test_writes_inside_session_dir_still_work(tmp_session: Path) -> None:
     result = run("open('scratch.txt', 'w').write('fine')", tmp_session)
     assert result.ok, f"Legitimate in-session write was blocked: {result.message}"
     assert (tmp_session / "scratch.txt").read_text() == "fine"
+
+
+def test_the_path_guard_does_not_re_enter_itself(tmp_path: Path) -> None:
+    """The guard must not be broken by the functions it guards.
+
+    `os.path.realpath` is pure Python on POSIX and resolves a path by
+    calling `os.lstat` and `os.readlink` -- both of which the guard
+    wraps. Without a re-entrancy flag each check resolves a path that
+    triggers another check, and the interpreter dies with RecursionError
+    before any policy decision is ever reached.
+
+    Every sandboxed execution on Linux and macOS failed this way, and the
+    containment tests still "passed" because a crash is also a refusal --
+    precisely the trap the sandbox-audit skill warns about: "denied" and
+    "the guard never ran" look identical from outside. Measured in a
+    container, pre-fix: a write *inside* the session directory, which
+    must succeed, failed with RecursionError. Windows was unaffected, and
+    was the only platform CI had ever managed to run.
+
+    `realpath` is stubbed with a POSIX-shaped one -- resolve by calling
+    `os.lstat` -- so this exercises the invariant on every platform
+    rather than passing vacuously on the one where the real `realpath` is
+    a single C call.
+    """
+    import os.path as osp
+
+    from cad_mcp._sandbox_policy import _PathPolicy
+
+    policy = _PathPolicy(str(tmp_path))
+    target = tmp_path / "a" / "b" / "c.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("x")
+
+    real_lstat = os.lstat
+    lstat_calls: list[str] = []
+
+    def guarded_lstat(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # What install_path_guard wraps os.lstat with.
+        lstat_calls.append(str(path))
+        policy.check(path, write=False)
+        return real_lstat(path, *args, **kwargs)
+
+    def posix_shaped_realpath(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        os.lstat(path)  # the guarded one, as posixpath would reach it
+        return str(path)
+
+    with mock.patch.object(os, "lstat", guarded_lstat), mock.patch.object(
+        osp, "realpath", posix_shaped_realpath
+    ):
+        policy.check(target, write=True)  # must not raise RecursionError
+
+    assert lstat_calls, "the re-entrant path was never exercised"
 
 
 # ------------------------------------------------------------------
@@ -223,6 +320,10 @@ def test_fork_is_blocked(tmp_session: Path) -> None:
 # ------------------------------------------------------------------
 
 
+# Wall-clock: the assertion is about how fast the timeout fires, which
+# means nothing while eleven other workers own the CPU.
+@pytest.mark.slow
+@pytest.mark.serial
 def test_infinite_loop_is_killed(tmp_session: Path) -> None:
     start = time.monotonic()
     result = sandbox.run("while True: pass", tmp_session, timeout=5)
@@ -233,6 +334,10 @@ def test_infinite_loop_is_killed(tmp_session: Path) -> None:
     assert elapsed < 25, f"Timeout took {elapsed:.1f}s to fire"
 
 
+# Counts python processes on the *host*, so a parallel run attributes
+# other workers' subprocesses to this test (measured: 62 -> 68).
+@pytest.mark.slow
+@pytest.mark.serial
 def test_timeout_kills_grandchildren(tmp_session: Path) -> None:
     """Nothing may outlive the timeout.
 
@@ -254,33 +359,81 @@ def test_timeout_kills_grandchildren(tmp_session: Path) -> None:
     )
 
 
+# Allocating 1.5GB while eleven other workers each hold a resident
+# CadQuery is how you measure the machine, not the memory cap.
+@darwin_memory_cap_unenforced
 @pytest.mark.slow
+@pytest.mark.serial
 def test_memory_bomb_is_killed(tmp_session: Path) -> None:
-    """A runaway allocation must be stopped on every platform.
+    """A runaway allocation must be stopped where the cap is enforced.
 
-    The cap has to sit above CadQuery's own import footprint (~600MB) or
-    the worker dies before it can report anything useful; 1.5GB leaves
-    headroom while still being reachable in a couple of seconds.
+    Linux and Windows, that is -- see the xfail above and SPEC N1 for
+    why macOS is not on that list.
     """
     start = time.monotonic()
     result = sandbox.run(
-        "import numpy\n"
-        "blocks = []\n"
-        "for _ in range(4000):\n"
-        "    blocks.append(numpy.zeros((1024, 1024, 32)))\n"
-        "result = 1",
+        MEMORY_BOMB,
         tmp_session,
         timeout=120,
-        memory_bytes=1536 * 1024 * 1024,
+        memory_bytes=MEMORY_CAP_MB * 1024 * 1024,
     )
     elapsed = time.monotonic() - start
 
-    assert not result.ok, "Memory bomb was not contained"
+    assert not result.ok, (
+        f"1.5GB was allocated and touched under a {MEMORY_CAP_MB}MB cap: "
+        f"the memory limit is not enforced here. {result.to_dict()}"
+    )
     assert result.error_type == "MemoryError", (
         f"Memory exhaustion should be reported as MemoryError, "
         f"got {result.to_dict()}"
     )
     assert elapsed < 100, "Cap was only enforced by the wall-clock timeout"
+
+
+@darwin_memory_cap_unenforced
+@pytest.mark.slow
+@pytest.mark.serial
+def test_the_memory_cap_survives_worker_reuse(
+    tmp_session: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-warmed worker must be capped too.
+
+    `main()` calls `sandbox.prewarm()` at start-up, so a reused worker is
+    not an edge case -- it is the path every production execution takes.
+    It was also the path with no memory cap on it: the Job Object was
+    only ever assigned on the cold path, and Windows accepts a job
+    assignment onto an already-running process and then declines to
+    enforce it. Verified against the unfixed code, this payload ran to
+    completion and reported ok=true.
+
+    The *default* cap is what matters here, because the default is what
+    the server runs with -- so rather than pass one, this lowers the
+    default and restarts the spare, which is the same code path
+    start-up takes.
+    """
+    sandbox.warm_worker.POOL.shutdown()
+    monkeypatch.setattr(sandbox, "DEFAULT_MEMORY_MB", MEMORY_CAP_MB)
+    sandbox.prewarm()
+
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if sandbox.warm_worker.POOL._spare is not None:
+            break
+        time.sleep(0.5)
+    else:
+        pytest.skip("the warm worker never came up; nothing to assert")
+
+    # No memory_bytes: this must be the default the spare was born with.
+    result = sandbox.run(MEMORY_BOMB, tmp_session, timeout=120)
+
+    assert not result.ok, (
+        f"a re-used warm worker allocated and touched 1.5GB under the "
+        f"{MEMORY_CAP_MB}MB default cap: the limit is not applied to "
+        f"pre-warmed workers. {result.to_dict()}"
+    )
+    assert result.error_type == "MemoryError", (
+        f"expected the memory cap to bite, got {result.to_dict()}"
+    )
 
 
 def _python_process_count() -> int:

@@ -221,23 +221,52 @@ async def test_export_step() -> None:
 
 
 @pytest.mark.anyio
-async def test_export_stl_deterministic() -> None:
-    """Gate: STL hash stable across two runs."""
+async def test_export_stl_deterministic_within_one_process() -> None:
+    """A canary, not the gate.
+
+    This only shows that two calls in one interpreter agree, which is
+    blind to anything seeded once at import -- it is exactly why the STEP
+    header timestamp and the random 3MF UUIDs survived (CAD-017). The
+    real guarantee is SPEC N4, tested across separate processes and all
+    four formats in `tests/test_determinism.py`.
+    """
     await _build(BOX_CODE)
 
-    result1 = await mcp.call_tool(
-        "export_model", {"format": "stl", "filename": "box1"}
-    )
-    data1 = flat(result1)
+    hashes = []
+    for name in ("box1", "box2"):
+        result = await mcp.call_tool(
+            "export_model", {"format": "stl", "filename": name}
+        )
+        path = Path(flat(result)["path"])
+        hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
 
-    result2 = await mcp.call_tool(
-        "export_model", {"format": "stl", "filename": "box2"}
-    )
-    data2 = flat(result2)
+    assert hashes[0] == hashes[1], "STL output is not deterministic"
 
-    hash1 = hashlib.sha256(Path(data1["path"]).read_bytes()).hexdigest()
-    hash2 = hashlib.sha256(Path(data2["path"]).read_bytes()).hexdigest()
-    assert hash1 == hash2, "STL output is not deterministic"
+
+@pytest.mark.anyio
+async def test_export_3mf() -> None:
+    """3MF had no test at all, and was broken: trimesh needs lxml.
+
+    The format is advertised in SPEC G4, the `export_model` schema, the
+    README and the modelling prompt, so a missing dependency made a
+    documented output format fail at runtime for every user.
+    """
+    await _build(BOX_CODE)
+    result = await mcp.call_tool(
+        "export_model", {"format": "3mf", "filename": "box"}
+    )
+    data = flat(result)
+
+    assert data["ok"] is True, data
+    path = Path(data["path"])
+    assert path.exists()
+    assert data["size_bytes"] > 0
+
+    import trimesh
+
+    mesh = trimesh.load(str(path), force="mesh")
+    assert mesh.is_watertight
+    assert mesh.volume == pytest.approx(50 * 30 * 10, rel=1e-3)
 
 
 @pytest.mark.anyio

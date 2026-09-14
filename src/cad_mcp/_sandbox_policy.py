@@ -31,6 +31,7 @@ import os
 import site
 import sys
 import sysconfig
+import threading
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -83,6 +84,9 @@ class SandboxViolation(PermissionError):
 
 class _PathPolicy:
     def __init__(self, tmpdir: str) -> None:
+        # Thread-local so that resolving a path cannot re-enter the check
+        # that is resolving it. See the long comment in `check`.
+        self._resolving = threading.local()
         self.tmpdir = os.path.realpath(tmpdir)
         roots = {
             sys.prefix,
@@ -120,6 +124,31 @@ class _PathPolicy:
         return path == root or path.startswith(root + os.sep)
 
     def check(self, path: Any, *, write: bool) -> None:
+        # `_resolve` calls `os.path.realpath`, which on POSIX is pure
+        # Python that walks the path calling `os.lstat` and `os.readlink`
+        # -- both of which this module wraps, so each one re-enters
+        # `check`, which resolves again, until the interpreter dies with
+        # RecursionError. Every sandboxed execution on Linux and macOS
+        # failed this way, surfacing as whatever confusing error the
+        # library in the middle happened to raise (CadQuery's selector
+        # grammar reported an arity mismatch). It never appeared on the
+        # development machine because Windows `realpath` is one C call
+        # into `nt._getfinalpathname` and touches neither wrapper.
+        #
+        # Skipping the check while we are inside one is safe: between the
+        # flag going up and coming down nothing runs but `os.path`
+        # arithmetic and stat calls on the very path the caller handed
+        # us. No user code can execute in that window, so nothing can use
+        # it to reach a file it would otherwise be denied.
+        if getattr(self._resolving, "active", False):
+            return
+        self._resolving.active = True
+        try:
+            self._check(path, write=write)
+        finally:
+            self._resolving.active = False
+
+    def _check(self, path: Any, *, write: bool) -> None:
         resolved = self._resolve(path)
         if resolved is None:
             return

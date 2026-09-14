@@ -323,7 +323,7 @@ result = (
 </table>
 
 <h3>Authentication</h3>
-<p>When <code>CAD_MCP_AUTH_TOKEN</code> is set, all MCP requests require <code>Authorization: Bearer &lt;token&gt;</code>. Requests without a valid token get HTTP 401. The health endpoint (<code>GET /health</code>) is always accessible without auth.</p>
+<p>When <code>CAD_MCP_AUTH_TOKEN</code> is set, all MCP requests require <code>Authorization: Bearer &lt;token&gt;</code>. Requests without a valid token get HTTP 401. The health endpoint (<code>GET /health</code>) is always accessible without auth, and reports readiness rather than liveness: <code>503</code> while the geometry kernel is still importing CadQuery, then <code>200</code> with the active render backend.</p>
 
 <!-- ──────────────────────────────────────────── -->
 <h2 id="prompts-resources">9. Prompts &amp; Resources</h2>

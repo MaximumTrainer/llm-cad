@@ -139,6 +139,18 @@ def cmd_list(args):
     return 0
 
 
+def write_lf(path: Path, text: str) -> None:
+    """Write *text* with LF endings on every platform and Python.
+
+    `Path.write_text(newline=...)` only exists from Python 3.10, and
+    CLAUDE.md tells people to run this with plain `python3` -- which on a
+    Windows box is whatever is first on PATH, 3.9 here. Writing bytes is
+    both older and stricter: nothing can translate the endings behind us,
+    so a vendored skill hashes the same on Windows as on Linux.
+    """
+    path.write_bytes(text.encode("utf-8"))
+
+
 def cmd_pull(args):
     data = catalogue(args.source, args.ref)
     directory = skills_dir(args.skills_dir)
@@ -165,7 +177,7 @@ def cmd_pull(args):
             text = fetch(args.source, args.ref, f"{skill['directory']}/{relative}")
             out = target / relative
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(text, encoding="utf-8", newline="\n")
+            write_lf(out, text)
             hashes[relative] = digest(text)
 
         manifest["source"] = args.source
@@ -299,7 +311,7 @@ def cmd_contribute(args):
         return 0
 
     patch = Path(f"{skill['directory']}.patch").resolve()
-    patch.write_text("".join(patch_lines), encoding="utf-8", newline="\n")
+    write_lf(patch, "".join(patch_lines))
     added = sum(1 for line in patch_lines if line.startswith("+") and not line.startswith("+++"))
     removed = sum(1 for line in patch_lines if line.startswith("-") and not line.startswith("---"))
 

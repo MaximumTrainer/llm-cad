@@ -31,6 +31,13 @@ jobs:
         run: uv run ruff check .
       - name: mypy --strict
         run: uv run mypy
+      # Platform-conditional code (Windows job objects, POSIX rlimits)
+      # typechecks differently per platform, and a developer only ever
+      # runs one. CI caught ctypes.WinDLL this way on its first run.
+      - name: mypy --strict (other platforms)
+        run: |
+          uv run mypy --platform win32
+          uv run mypy --platform darwin
 
   test:
     name: tests (${{ matrix.os }})
@@ -48,12 +55,81 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-extras
-      - name: pytest (fast subset first, for quick signal)
-        run: uv run pytest -q -m "not geometry and not slow"
-      - name: pytest (full)
+      # Under 30s, and it covers the envelope, argument handling and the
+      # error paths -- so a broken PR usually fails here, minutes before
+      # the geometry tests finish.
+      - name: pytest (fast tier, for quick signal)
+        run: uv run pytest -q -m "not geometry and not slow" -n0
+      - name: pytest (full, parallel)
         run: uv run pytest -q
+      # Wall-clock budgets and timeout probes mean nothing while eleven
+      # other workers saturate the CPU, so they sit out the parallel run
+      # and get the machine to themselves here.
+      - name: pytest (serial — wall-clock budgets and timeouts)
+        run: uv run pytest -q -m serial -n0
       - name: smoke (full loop)
         run: uv run python scripts/smoke.py
+
+      # SPEC N4 has a cross-platform half that no single runner can check.
+      - name: determinism (separate processes)
+        run: >
+          uv run python scripts/determinism_check.py
+          --json determinism-${{ matrix.os }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: determinism-${{ matrix.os }}
+          path: determinism-${{ matrix.os }}.json
+
+  # SPEC N4's cross-platform half. Each `test` job hashed its own exports
+  # in two separate processes (that part is a blocking gate); this compares
+  # the results between operating systems.
+  #
+  # Informational on purpose, for now. OCCT tessellation is IEEE-754
+  # arithmetic through libm, and `macos-latest` is arm64 while the other
+  # runners are x86-64, so a last-ulp difference in a sin/cos used to
+  # discretise a fillet would change a vertex and therefore every byte
+  # downstream. That is a real possibility that has not been measured, and
+  # asserting it before measuring it would just paint the build red.
+  # Promote to a required check — and tighten SPEC N4 — once this job has
+  # been observed green across the matrix.
+  determinism-cross-os:
+    name: determinism (cross-OS, informational)
+    needs: test
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: determinism-*
+          merge-multiple: false
+      - name: every OS must agree, format by format
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+
+          runs = {}
+          for path in sorted(pathlib.Path(".").glob("determinism-*/*.json")):
+              runs[path.parent.name] = json.loads(path.read_text())
+
+          if len(runs) < 2:
+              sys.exit(f"expected >=2 platforms, got {sorted(runs)}")
+
+          formats = sorted(next(iter(runs.values())))
+          failed = []
+          for fmt in formats:
+              seen = {os_name: h[fmt] for os_name, h in runs.items()}
+              unique = set(seen.values())
+              status = "ok" if len(unique) == 1 else "DIFFERS"
+              print(f"{fmt:5} {status}")
+              if len(unique) != 1:
+                  failed.append(fmt)
+                  for os_name, digest in sorted(seen.items()):
+                      print(f"      {os_name:24} {digest}")
+
+          if failed:
+              sys.exit(f"SPEC N4 violated across platforms: {failed}")
+          print(f"all {len(formats)} formats byte-identical across {sorted(runs)}")
+          PY
 
   # PLAN Phase 2 gate: the matplotlib fallback must work where EGL is absent.
   render-fallback:
@@ -93,7 +169,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libosmesa6-dev libgl1 libglu1-mesa freeglut3-dev
-      - run: uv sync --all-extras --extra gpu
+        # `--all-extras` already includes `gpu`, and uv refuses the two
+        # together: "the argument '--all-extras' cannot be used with
+        # '--extra <EXTRA>'". The job never reached pytest.
+      - run: uv sync --all-extras
       - name: render via pyrender
         env:
           PYOPENGL_PLATFORM: osmesa

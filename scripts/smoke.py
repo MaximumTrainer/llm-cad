@@ -103,13 +103,17 @@ async def main() -> None:
     if checked.get("issues"):
         print(f"  warnings: {checked['issues']}")
 
-    # ── Step 5: export_model (STL + STEP) ────────────────────────
+    # ── Step 5: export_model (every advertised format) ───────────
     print("\nStep 5: export_model")
     # Keep the paths the tool actually returned. Reconstructing them from
     # the session tmpdir broke silently the moment exports moved to the
     # durable output dir (CAD-023) — the pre-push hook caught it.
+    # Every format SPEC G4 advertises, not just the two the loop needs:
+    # 3MF export was broken for every user because trimesh needs lxml and
+    # nothing declared it, and this is the job that runs with runtime
+    # dependencies alone (CAD-012 clean-install).
     exported: dict[str, Path] = {}
-    for fmt in ("stl", "step"):
+    for fmt in ("stl", "step", "3mf", "glb"):
         exp = _payload(
             await mcp.call_tool(
                 "export_model", {"format": fmt, "filename": "bracket"}

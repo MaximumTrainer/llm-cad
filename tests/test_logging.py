@@ -23,7 +23,8 @@ from cad_mcp.server import mcp
 
 # Builds real geometry, so each test pays a sandbox subprocess.
 # Deselect with -m "not geometry" for fast feedback (CAD-025).
-pytestmark = pytest.mark.geometry
+# Logging is exercised through `ping` and direct decorator calls; only
+# the stdout-cleanliness test needs real geometry (CAD-025).
 
 ROOT = Path(__file__).resolve().parent.parent
 BOX = "import cadquery as cq\nresult = cq.Workplane('XY').box(5,5,5)"
@@ -243,6 +244,7 @@ os._exit(0)
 """
 
 
+@pytest.mark.geometry
 @pytest.mark.slow
 def test_nothing_reaches_stdout_during_tool_calls(tmp_path: Path) -> None:
     """PLAN's named risk: a stray print corrupts stdio MCP framing.

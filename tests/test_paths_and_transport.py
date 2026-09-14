@@ -21,7 +21,10 @@ from .envelope_helpers import flat, summary
 
 # Builds real geometry, so each test pays a sandbox subprocess.
 # Deselect with -m "not geometry" for fast feedback (CAD-025).
-pytestmark = pytest.mark.geometry
+# Most of this file is pure argument handling -- path validation,
+# constant-time token comparison, host allowlists -- which needs no
+# geometry at all. The blanket file-level marker put 37 such tests
+# behind a sandbox subprocess they never used (CAD-025).
 
 BOX = "import cadquery as cq\nresult = cq.Workplane('XY').box(10, 10, 10)"
 
@@ -77,6 +80,7 @@ def test_safe_output_path_stays_inside(tmp_path: Path) -> None:
     assert ".." not in str(resolved)
 
 
+@pytest.mark.geometry
 def test_export_rejects_traversal_and_writes_nothing() -> None:
     """The escape proven during review, end to end through the tool."""
     escaped = Path.home() / "cadmcp_export_escape.stl"
@@ -97,6 +101,7 @@ def test_export_rejects_traversal_and_writes_nothing() -> None:
     assert not escaped.exists(), "SANDBOX ESCAPE: export wrote outside"
 
 
+@pytest.mark.geometry
 def test_export_returns_a_resolved_path() -> None:
     async def scenario() -> dict[str, object]:
         await mcp.call_tool("execute_cad", {"code": BOX})
@@ -118,6 +123,7 @@ def test_export_returns_a_resolved_path() -> None:
 # ------------------------------------------------------------------
 
 
+@pytest.mark.geometry
 def test_exports_survive_reset_session() -> None:
     """`reset_session` used to rmtree the directory holding the STL."""
 
@@ -233,6 +239,7 @@ def test_os_environ_is_not_leaked_into_output_dir() -> None:
     assert session.output_root().is_absolute()
 
 
+@pytest.mark.geometry
 def test_export_collisions_do_not_overwrite() -> None:
     """A second export of the same name must not destroy the first."""
 

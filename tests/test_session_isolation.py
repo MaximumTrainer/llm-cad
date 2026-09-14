@@ -19,7 +19,9 @@ from .envelope_helpers import flat, summary
 
 # Builds real geometry, so each test pays a sandbox subprocess.
 # Deselect with -m "not geometry" for fast feedback (CAD-025).
-pytestmark = pytest.mark.geometry
+# Session identity, eviction and locking are registry logic; only the
+# tests that assert two clients cannot see each other's *models* need
+# geometry (CAD-025).
 
 BOX_10 = "import cadquery as cq\nresult = cq.Workplane('XY').box(10, 10, 10)"
 BOX_50 = "import cadquery as cq\nresult = cq.Workplane('XY').box(50, 50, 50)"
@@ -123,6 +125,7 @@ def test_header_lookup_is_case_insensitive() -> None:
     assert session.resolve_id(LowerCtx()) == "abc"
 
 
+@pytest.mark.geometry
 def test_two_sessions_do_not_see_each_others_models() -> None:
     """The core leak: client B's model overwrote client A's."""
     from cad_mcp.server import mcp
@@ -149,6 +152,7 @@ def test_two_sessions_do_not_see_each_others_models() -> None:
     assert b_box["dimensions"]["x"] == pytest.approx(50, abs=0.01)
 
 
+@pytest.mark.geometry
 def test_code_history_does_not_leak_between_sessions() -> None:
     from cad_mcp.server import mcp
 
@@ -165,6 +169,7 @@ def test_code_history_does_not_leak_between_sessions() -> None:
     assert other["code"] is None, "Another session's code leaked"
 
 
+@pytest.mark.geometry
 def test_reset_only_affects_the_calling_session() -> None:
     from cad_mcp.server import mcp
 
@@ -295,6 +300,7 @@ def test_idle_timeout_default_is_300s(monkeypatch: pytest.MonkeyPatch) -> None:
 # ------------------------------------------------------------------
 
 
+@pytest.mark.geometry
 def test_concurrent_executes_produce_whole_not_mixed_geometry() -> None:
     """Concurrent builds must never leave torn or blended geometry.
 
@@ -341,6 +347,7 @@ def test_concurrent_executes_produce_whole_not_mixed_geometry() -> None:
     ), f"Geometry is a mixture of both runs: x-extent {extent}"
 
 
+@pytest.mark.geometry
 def test_concurrent_runs_use_separate_scratch_dirs() -> None:
     """The shared `user_code.py`/`current.brep` race (CAD-008)."""
     from cad_mcp import sandbox
@@ -369,6 +376,7 @@ def test_concurrent_runs_use_separate_scratch_dirs() -> None:
     )
 
 
+@pytest.mark.geometry
 def test_each_run_gets_its_own_working_files() -> None:
     """`user_code.py`/`current.brep` used to be shared per session."""
     from cad_mcp import sandbox
@@ -384,6 +392,7 @@ def test_each_run_gets_its_own_working_files() -> None:
     )
 
 
+@pytest.mark.geometry
 def test_failed_run_does_not_clobber_good_geometry() -> None:
     from cad_mcp.server import mcp
 

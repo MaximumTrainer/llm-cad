@@ -23,9 +23,25 @@ from .envelope_helpers import flat
 pytestmark = pytest.mark.geometry
 
 
+# `test_no_common_error_class_is_left_hintless` re-ran every HINT_CASES
+# entry that the parametrised test above had just run, which made it the
+# single slowest test in the suite at 53s. The result of running a fixed
+# snippet is a pure function of that snippet, so it is cached: the
+# coverage guard now reuses the answers instead of re-earning them
+# (CAD-025).
+_RUN_CACHE: dict[str, sandbox.SandboxResult] = {}
+
+
 def _run(code: str) -> sandbox.SandboxResult:
+    cached = _RUN_CACHE.get(code)
+    if cached is not None:
+        return cached
     tmp = Path(tempfile.mkdtemp(prefix="cad-mcp-hint-"))
-    return sandbox.run(code, tmp, brep_out=tmp / "out.brep")
+    result = sandbox.run(code, tmp, brep_out=tmp / "out.brep")
+    # SandboxResult is a frozen dataclass, so handing the same instance to
+    # two tests cannot let one of them affect the other.
+    _RUN_CACHE[code] = result
+    return result
 
 
 # ------------------------------------------------------------------
