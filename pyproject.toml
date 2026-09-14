@@ -81,7 +81,8 @@ testpaths = ["tests"]
 # An *unmarked* test is the fast tier: no sandbox, no render, no network.
 # It covers the response envelope, argument handling, error paths, docs
 # consistency and pure helpers via fixtures rather than live runs, and the
-# whole tier is expected to stay under 30s.
+# whole tier runs in about 40s (measured 33-50s depending on what else
+# the machine is doing).
 markers = [
     "geometry: builds real geometry; pays a sandbox subprocess or a tessellation",
     "slow: seconds each on its own account (perf budgets, resource limits, subprocess probes)",
@@ -90,7 +91,7 @@ markers = [
     "serial: wall-clock sensitive; skipped under -n >1 and run in a serial pass",
 ]
 #   uv run pytest                            everything except live LLM
-#   uv run pytest -m "not geometry and not slow"   the fast tier (<30s)
+#   uv run pytest -m "not geometry and not slow"   the fast tier (~40s)
 #   uv run pytest -m llm                     live OpenRouter tests
 #   uv run pytest -m serial -n0      the budget/timeout tests
 #   uv run pytest -n0                serial, for debugging

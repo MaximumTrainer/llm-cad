@@ -69,7 +69,7 @@ the code, the skills registry, and the hooks.
 ```bash
 uv run pytest -q                      # default: parallel, everything but llm + serial
 uv run pytest -m serial -n0           # wall-clock budgets; needs an idle machine
-uv run pytest -m "not geometry and not slow" -n0   # fast tier, <30s
+uv run pytest -m "not geometry and not slow" -n0   # fast tier, ~40s
 uv run pytest -m llm -v               # live OpenRouter tests (needs a key)
 uv run pytest -n0                     # serial, for debugging a single failure
 ```

@@ -42,7 +42,7 @@ How to use: work one phase per Claude Code session. Paste the phase prompt, let 
 **Prompt:**
 > Implement streamable HTTP transport per SPEC 10.1. Add `--transport http` CLI flag and env-var config (`CAD_MCP_HOST`, `CAD_MCP_PORT`, `CAD_MCP_AUTH_TOKEN`). Bearer token auth via SDK `TokenVerifier`. Health endpoint at `GET /health`. CORS support via `CAD_MCP_CORS_ORIGIN`. Stdio remains the default. Add `transport.py` for config; update `server.py` main(). Tests: server starts on HTTP, tool call succeeds over HTTP, 401 without token when token is set, health endpoint responds without auth.
 
-**Gate:** `curl http://localhost:8000/health` returns 200; MCP client connects over HTTP and calls `ping`; unauthorized request returns 401; stdio mode unaffected.
+**Gate:** `curl http://localhost:8000/health` returns 200 once the geometry kernel is up (503 before it — see SPEC H7); MCP client connects over HTTP and calls `ping`; unauthorized request returns 401; stdio mode unaffected.
 
 ## Phase 6b — `gen_ai_mesh` tool (SPEC 10.2, ~half day)
 **Prompt:**
@@ -55,6 +55,14 @@ How to use: work one phase per Claude Code session. Paste the phase prompt, let 
 > Implement assembly support per SPEC 10.3. Update `session.py` with `Part` dataclass (name, code_history, brep_path, color, position) and assembly state. Add tools: `create_part`, `set_active_part`, `position_part`, `list_parts`, `delete_part`. Modify `execute_cad` to target active part, `render_views` to compose all parts with distinct colors, `validate_mesh` to add interference check, `measure` to add `clearance` mode, `export_model` to produce per-part + combined files (XCAF for STEP). Backward compatible: sessions without `create_part` behave as v1 (implicit "main" part). Max 16 parts.
 
 **Gate:** create box + lid, position lid above, render shows both colored, export produces 3 STLs, validate flags interference when overlapping, clearance returns 0 when touching and >0 when separated; all v1 tests still pass.
+
+## Phase 6d — Hosted deployment (SPEC 10.4, ~1 day)
+**Prompt:**
+> Make the server deployable as a remote MCP endpoint per SPEC 10.4. Add a multi-stage `Dockerfile` (runtime deps only, non-root, EGL/Mesa present) and `fly.toml`. Add `CAD_MCP_PUBLIC_URL` so OAuth metadata advertises the reachable origin rather than the bind address. Make `GET /health` report readiness — 503 until the geometry worker has imported CadQuery — and name the active render backend. Establish session affinity inside the app by wrapping the session id as `<machine-id>~<sdk-id>` and answering `fly-replay` for a session this instance does not own; a request already carrying `fly-replay-src` gets a JSON-RPC `-32600` telling the client to re-initialize. Add `.github/workflows/deploy.yml` gating test → container → deploy → smoke, and `scripts/smoke_remote.py` driving the core loop over the wire.
+
+**Gate:** the image builds and serves; `scripts/smoke_remote.py --repeat 10` passes against the container; `scripts/check_affinity.sh` passes across two containers with distinct `FLY_MACHINE_ID`s **and fails when both URLs point at the same one**; the sandbox's N1 guarantees still hold inside the container, asserted by effect.
+
+**Not done:** nothing is deployed to a real host. On-platform latency and cold start, proof that the platform proxy honours `fly-replay`, and a rollback performed once all need a Fly account — tracked in [#1](https://github.com/MaximumTrainer/llm-cad/issues/1).
 
 ## Risk register
 - **OCP/cadquery install pain** (heaviest dependency, platform-sensitive): pin exact versions in Phase 0; document conda fallback. Mitigate first — it's the most likely Day-1 blocker.

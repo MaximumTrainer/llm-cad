@@ -19,6 +19,14 @@ from cad_mcp.server import mcp
 ROOT = Path(__file__).resolve().parent.parent
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 SPEC = (ROOT / "SPEC.md").read_text(encoding="utf-8")
+#: The published website. `docs/` is uploaded to GitHub Pages verbatim
+#: -- there is no generator -- so these are hand-maintained twins of
+#: the README and drift silently unless something checks them. They
+#: had: the landing page advertised "13 MCP tools" and omitted `ping`.
+SITE = {
+    "docs/index.html": (ROOT / "docs" / "index.html").read_text(encoding="utf-8"),
+    "docs/guide.html": (ROOT / "docs" / "guide.html").read_text(encoding="utf-8"),
+}
 
 # Tools that legitimately need no prompt coverage, with the reason.
 PROMPT_EXEMPT = {
@@ -134,4 +142,80 @@ def test_default_part_colour_matches_spec() -> None:
 
     assert Part(name="x").color == "steel", (
         "SPEC 10.3 documents create_part(color='steel') as the default"
+    )
+
+
+# ------------------------------------------------------------------
+# The published site (docs/*.html), a hand-maintained twin
+# ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("page", sorted(SITE))
+def test_every_registered_tool_appears_on_the_site(page: str) -> None:
+    """A tool the site does not mention is a tool nobody discovers."""
+    missing = [n for n in tool_names() if f"<code>{n}</code>" not in SITE[page]]
+    assert not missing, (
+        f"{page} does not mention: {missing}. It is published to GitHub "
+        f"Pages verbatim, so an omission here is a user-visible gap."
+    )
+
+
+#: `<code>` spans on the site that look like a tool name but are not:
+#: prompt names, tool *arguments*, CadQuery identifiers, filenames.
+#: Anything snake_case in a code span that is not here and not a
+#: registered tool is treated as a tool the site invented.
+NON_TOOL_CODE_SPANS = frozenset(
+    {
+        # prompts
+        "design_workflow",
+        "cadquery_primer",
+        "printability_checklist",
+        # tool arguments
+        "from_selector",
+        "to_selector",
+        "min_wall_mm",
+        "max_overhang_deg",
+        "target_polycount",
+        "art_style",
+        # example resource names
+        "pipe_clamp",
+        "phone_stand",
+        "threaded_cap",
+        "desk_organizer",
+        # filenames and identifiers that appear in snippets
+        "claude_desktop_config",
+        "user_code",
+        "model_box",
+        "model_lid",
+        "model_assembly",
+        "forConstruction",
+    }
+)
+
+
+@pytest.mark.parametrize("page", sorted(SITE))
+def test_the_site_does_not_advertise_tools_that_do_not_exist(page: str) -> None:
+    """A renamed tool must not survive on the site under its old name."""
+    snake_in_code = r"<code>([a-z][a-z0-9]*(?:_[a-z0-9]+)+)</code>"
+    mentioned = set(re.findall(snake_in_code, SITE[page]))
+    invented = mentioned - set(tool_names()) - NON_TOOL_CODE_SPANS
+    invented = {m for m in invented if not m.startswith(("cad_mcp", "meshy_"))}
+    assert not invented, (
+        f"{page} names tools that are not registered: {sorted(invented)}. "
+        f"If one is not a tool, add it to NON_TOOL_CODE_SPANS with a reason."
+    )
+
+
+def test_the_landing_page_tool_count_matches_reality() -> None:
+    """The number in the prose and the number of tools must agree.
+
+    It said 13 while 14 were registered, because `ping` was left out of
+    the table and nobody recounted.
+    """
+    page = SITE["docs/index.html"]
+    stated = re.search(r"(\d+) MCP tools", page)
+    assert stated, "docs/index.html no longer states a tool count"
+    assert int(stated.group(1)) == len(tool_names()), (
+        f"docs/index.html advertises {stated.group(1)} MCP tools, "
+        f"but {len(tool_names())} are registered"
     )

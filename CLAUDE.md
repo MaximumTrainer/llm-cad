@@ -12,7 +12,7 @@ The visual feedback loop is the product. Any change that makes renders slower th
 - Python 3.11+, `uv` for dependency management
 - MCP: official `mcp` Python SDK v2, `MCPServer` (was `FastMCP` in v1), stdio + streamable HTTP transports (SPEC 10.1)
 - Geometry: `cadquery` (B-rep via OCP). Do NOT swap to trimesh/numpy-stl for modeling — they're mesh-only, used solely in validation.
-- Rendering: headless — export to mesh, render with `pyrender` + `EGL` offscreen (fallback: matplotlib 3D for CI). No GUI dependencies ever.
+- Rendering: headless — export to mesh, then matplotlib 3D by default, or `pyrender` + `EGL` offscreen when the optional `gpu` extra and a working EGL/OSMesa are present. matplotlib is what runs in CI and in the container, not just a CI fallback. `GET /health` and every render response name the live backend. No GUI dependencies ever.
 - Validation: `trimesh` for watertightness, `manifold3d` for manifold checks
 - AI mesh: `httpx` async client for Meshy API (SPEC 10.2); `MESHY_API_KEY` env var required
 - Tests: `pytest`, golden-file tests compare exported STEP/STL hashes and rendered image perceptual hashes
@@ -37,10 +37,16 @@ The visual feedback loop is the product. Any change that makes renders slower th
 - `pin-bump` — changing a cadquery/OCP/trimesh/manifold3d/mcp pin
 - `release-check` — before tagging
 
+Vendored from the shared catalogue, alongside them:
+- `outside-in-tdd` — driving a change acceptance-red → contract-red → unit-red → green
+- `docs-drift-guard` — keeping README, SPEC and the hand-maintained `docs/*.html` twins truthful
+
+[`.claude/agent.md`](.claude/agent.md) is the working agreement these serve.
+
 ## Commands
-- `uv run pytest` — full suite, parallel (~2.5 min; excludes `serial`)
+- `uv run pytest` — full suite, parallel (~3.5 min idle, longer on a busy machine; excludes `serial`)
 - `uv run pytest -m serial -n0` — wall-clock budgets and timeout probes, un-contended
-- `uv run pytest -m "not geometry and not slow" -n0` — fast tier, <30s, no sandbox
+- `uv run pytest -m "not geometry and not slow" -n0` — fast tier, ~40s, no sandbox
 - `uv run cad-mcp` — start server on stdio
 - `uv run cad-mcp --transport http` — start server on streamable HTTP (port 8000)
 - `uv run python scripts/smoke.py` — end-to-end: builds a bracket, renders, validates, exports

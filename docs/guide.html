@@ -236,6 +236,9 @@ result = (
 <h3><code>list_session</code> / <code>reset_session</code></h3>
 <p><code>list_session</code> shows current parts, code history, and export history. <code>reset_session</code> clears all state.</p>
 
+<h3><code>ping</code></h3>
+<p>Returns <code>pong</code>. Takes no arguments. Worth knowing about because it answers from the server process itself: if a geometry operation has just crashed the kernel worker, a successful <code>ping</code> confirms the server survived it and the next call will get a fresh kernel.</p>
+
 <!-- ──────────────────────────────────────────── -->
 <h2 id="assemblies">6. Multi-Part Assemblies</h2>
 
@@ -317,10 +320,18 @@ result = (
     <tr><td><code>CAD_MCP_PORT</code></td><td><code>8000</code></td><td>Bind port</td></tr>
     <tr><td><code>CAD_MCP_AUTH_TOKEN</code></td><td>(none)</td><td>Bearer token for auth</td></tr>
     <tr><td><code>CAD_MCP_CORS_ORIGIN</code></td><td>(none)</td><td>Allowed CORS origin</td></tr>
-    <tr><td><code>CAD_MCP_ALLOWED_HOSTS</code></td><td>(none)</td><td>Comma-separated allowed hostnames</td></tr>
-    <tr><td><code>CAD_MCP_STATELESS</code></td><td><code>0</code></td><td><code>1</code> for stateless HTTP mode</td></tr>
+    <tr><td><code>CAD_MCP_ALLOWED_HOSTS</code></td><td>(none)</td><td>Comma-separated allowed hostnames. Deny-by-default off loopback, so list the hostnames clients actually send or every request is rejected.</td></tr>
+    <tr><td><code>CAD_MCP_PUBLIC_URL</code></td><td>(none)</td><td><strong>Required off loopback.</strong> The origin clients actually reach, e.g. <code>https://cad-mcp.example.com</code>. The bind address is not a URL: without this, a server on <code>0.0.0.0</code> advertises <code>http://0.0.0.0:8000/mcp</code> as its OAuth resource URL.</td></tr>
+    <tr><td><code>CAD_MCP_STATELESS</code></td><td><code>0</code></td><td><code>1</code> for stateless HTTP mode. <strong>Not</strong> a way to avoid session affinity &mdash; it breaks the core loop, because <code>render_views</code> reads state <code>execute_cad</code> wrote.</td></tr>
+    <tr><td><code>CAD_MCP_SESSION_IDLE_TIMEOUT_S</code></td><td><code>300</code></td><td>Seconds an unused session is kept before eviction</td></tr>
+    <tr><td><code>CAD_MCP_OUTPUT_DIR</code></td><td><code>./cad-mcp-output</code></td><td>Where exports are written &mdash; outside the session temp dir, which <code>reset_session</code> deletes</td></tr>
   </tbody>
 </table>
+
+<p>The <a href="https://github.com/MaximumTrainer/llm-cad#configuration">README</a> lists every variable the server reads, including the sandbox, geometry-kernel and rendering knobs.</p>
+
+<h3>Running it hosted</h3>
+<p>There is a <code>Dockerfile</code> and a <code>fly.toml</code> in the repo, plus a deploy workflow and a smoke test that drives the full core loop over the wire. Because MCP's streamable HTTP transport is stateful &mdash; parts, code history and the cached <code>.brep</code> live on one machine's disk &mdash; a multi-instance deployment needs session affinity, which the server establishes itself. See <a href="https://github.com/MaximumTrainer/llm-cad/blob/main/docs/deploy.md">docs/deploy.md</a>.</p>
 
 <h3>Authentication</h3>
 <p>When <code>CAD_MCP_AUTH_TOKEN</code> is set, all MCP requests require <code>Authorization: Bearer &lt;token&gt;</code>. Requests without a valid token get HTTP 401. The health endpoint (<code>GET /health</code>) is always accessible without auth, and reports readiness rather than liveness: <code>503</code> while the geometry kernel is still importing CadQuery, then <code>200</code> with the active render backend.</p>
@@ -340,6 +351,7 @@ result = (
 <h3>MCP Resources</h3>
 <ul>
   <li><code>cad://session/current/code</code> &mdash; The full CadQuery source code of the current model. Useful for recovery after context loss.</li>
+  <li><code>cad://examples</code> &mdash; An index of the curated examples, one line each. A concrete resource, because a client that only lists concrete resources would otherwise never discover the templated one below.</li>
   <li><code>cad://examples/{name}</code> &mdash; Curated example models the LLM can study. Available: bracket, enclosure, flange, pipe_clamp, phone_stand, threaded_cap, gear, desk_organizer.</li>
 </ul>
 
@@ -368,8 +380,12 @@ uv sync --reinstall
 # Or install via conda-forge
 conda install -c conda-forge cadquery</code></pre>
 
-<p><strong>Segfault on exit (exit code 139/127)</strong></p>
-<p>OCP (OpenCascade) sometimes segfaults during Python interpreter shutdown. This is cosmetic &mdash; all output is correct before the crash. Safe to ignore in CI.</p>
+<p><strong>Segfault on exit (exit code 139 / 0xC0000374)</strong></p>
+<p>OCP tears down OpenCascade's static destructors at interpreter exit and sometimes crashes doing it &mdash; after all the real work has completed and been written. Two things now handle this, so you should not see it:</p>
+<ul>
+  <li><strong>The server</strong> runs OCP in a separate long-lived worker process, so a kernel fault becomes a structured tool error and the server keeps answering. Set <code>CAD_MCP_GEOMETRY_ISOLATION=0</code> to turn that off for debugging and the crash comes back, taking the server with it.</li>
+  <li><strong>The test suite</strong> flushes and hard-exits, skipping the destructors, so pytest's exit code means what it says.</li>
+</ul>
 
 <h3>Rendering</h3>
 
@@ -400,9 +416,11 @@ m = manifold3d.Manifold(mesh)
 print(m.status())  # Error.NoError for valid manifold</code></pre>
 
 <h3>CI issues</h3>
-<p><strong>Tests pass but exit code is non-zero (139)</strong></p>
-<p>This is the OCP shutdown segfault. In CI, check pytest's output rather than the exit code:</p>
-<pre><code>uv run pytest -v 2>&amp;1 | tee test_output.txt; grep -q "passed" test_output.txt</code></pre>
+<p><strong>Do not work around the exit code.</strong> Older advice here suggested grepping pytest's output for &ldquo;passed&rdquo; instead of trusting its exit status, because of the OCP shutdown segfault. That is no longer true and was never safe &mdash; it turns a crashed run into a green one. The suite hard-exits after flushing, so the exit code is correct, and CI relies on it directly:</p>
+<pre><code>uv run pytest -q                       # everything except live LLM tests
+uv run pytest -q -m serial -n0          # wall-clock budgets, un-contended</code></pre>
+<p><strong>Wall-clock tests fail on a busy machine</strong></p>
+<p>Tests marked <code>serial</code> assert how fast a timeout fires or count processes on the host, which measures the machine rather than the code when other work is running. Run them with <code>-n0</code> on an idle machine. The default selection already excludes them from the parallel run.</p>
 
 </div>
 

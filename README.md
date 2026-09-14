@@ -79,7 +79,10 @@ uv run cad-mcp --transport http
 CAD_MCP_TRANSPORT=http uv run cad-mcp
 ```
 
-**Environment variables:**
+**Environment variables.** Every variable the server reads, grouped by what it
+affects. Defaults are the ones in the code, not aspirations.
+
+### Transport
 
 | Variable | Default | Description |
 |---|---|---|
@@ -91,6 +94,46 @@ CAD_MCP_TRANSPORT=http uv run cad-mcp
 | `CAD_MCP_ALLOWED_HOSTS` | (none) | Comma-separated allowed hostnames |
 | `CAD_MCP_PUBLIC_URL` | (none) | Externally reachable origin, e.g. `https://cad-mcp.example.com`. Required off loopback: the bind address is not a URL clients can use, and OAuth metadata would otherwise advertise `http://0.0.0.0:8000/mcp`. |
 | `CAD_MCP_STATELESS` | `0` | `1` for stateless HTTP mode. **Not** a way to avoid session affinity — it breaks the core loop, because `render_views` reads state `execute_cad` wrote. |
+
+### Session and output
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAD_MCP_OUTPUT_DIR` | `./cad-mcp-output` | Where exports are written. Deliberately outside the session temp dir, which `reset_session` deletes. |
+| `CAD_MCP_SESSION_IDLE_TIMEOUT_S` | `300` | Seconds an unused HTTP session is kept before eviction. |
+
+### Sandbox (SPEC N1)
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAD_MCP_SANDBOX_TIMEOUT_S` | `30` | Wall-clock limit for one execution. |
+| `CAD_MCP_SANDBOX_MEM_MB` | `2048` | Memory cap. Enforced on Linux and Windows; **not on macOS** — see SPEC N1. |
+| `CAD_MCP_SANDBOX_FILE_MB` | `512` | Largest file model code may write. |
+| `CAD_MCP_SANDBOX_MAX_PROCS` | `max(256, cpus x 32)` | Runaway-spawn brake, not a precise cap — see SPEC N1. |
+| `CAD_MCP_WARM_WORKER` | `1` | `0` disables the pre-warmed worker, so every execution pays the ~3.3s CadQuery import. |
+
+### Geometry kernel (SPEC §7)
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAD_MCP_GEOMETRY_ISOLATION` | `1` | `0` runs OCP in the server process again. A debugging escape hatch, not a supported mode: a kernel fault then takes the server with it. |
+| `CAD_MCP_GEOMETRY_TIMEOUT_S` | `120` | Wall-clock limit for one geometry operation (tessellate, measure, STEP export). |
+
+### Rendering
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAD_MCP_FORCE_BACKEND` | (auto) | `pyrender` or `matplotlib`. Forcing `pyrender` fails loudly when EGL is unavailable, rather than falling back silently. |
+| `PYOPENGL_PLATFORM` | (unset) | `egl` for headless GL, `osmesa` for Mesa software rendering. |
+
+### AI mesh and logging
+
+| Variable | Default | Description |
+|---|---|---|
+| `MESHY_API_KEY` | (none) | Required by `gen_ai_mesh`; the tool returns a structured missing-key error without it. |
+| `CAD_MCP_MESHY_MAX_MB` | `128` | Largest GLB accepted from the Meshy API. |
+| `CAD_MCP_MAX_SEW_TRIS` | `20000` | Triangle ceiling for sewing a downloaded mesh into a B-rep. |
+| `CAD_MCP_LOG_LEVEL` | `INFO` | Level for the structured per-tool-call logs, which go to **stderr** (stdout belongs to the stdio framing). |
 
 **Health check:** `GET /health` (no auth required) reports *readiness*, not liveness. It answers `503 {"status": "starting", ...}` for the ~3s the geometry kernel takes to import CadQuery, then `200 {"status": "ok", "kernel": "ready", "render_backend": "matplotlib", "version": "0.1.0"}`. Point a load balancer at it and no client reaches a machine that cannot yet run geometry; `render_backend` tells you which of the two backends N5 allows you actually got.
 
