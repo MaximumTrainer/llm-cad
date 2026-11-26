@@ -338,5 +338,47 @@ procedure live in `docs/deploy.md`. Nothing is deployed to a real host
 yet, so on-platform latency and cold start, and a rollback performed
 once, remain open.
 
+### 10.5 Headless course generation (`llm-cad generate-course`)
+
+A console script, `llm-cad`, alongside `cad-mcp`, for callers with no MCP
+host in the loop. Its one subcommand serves virtualrow's monthly scenery
+workflow (llm-cad #42, virtualrow #449): turn one rownative course JSON
+into scenery GLBs and the placements that put them on the route. It adds
+no MCP tool and changes no tool's behaviour.
+
+```
+llm-cad generate-course --course-json <path> --out <dir> [--model <id>] [--seed <int>] [--max-models 3]
+```
+
+- H1: **Input.** The caller supplies the course file; nothing but the
+  model call touches the network.
+- H2: **Model.** One OpenAI-compatible `/chat/completions` call returns a
+  JSON plan of at most `--max-models` objects (code + placement), sent
+  with `temperature=0` and `seed`. Base URL from `LLM_CAD_MODEL_BASE_URL`
+  (default OpenRouter). The key is read from `LLM_CAD_MODEL_API_KEY`, sent
+  only in the `Authorization` header, and never printed or written.
+- H3: **Execution.** Every model's code runs through `sandbox.py`, exactly
+  as `execute_cad` does (§7). A failure gets one repair call carrying the
+  structured error; a second failure fails that model only.
+- H4: **Output.** `<slug>.glb` per model; `placements.json`, an array of
+  `{modelId, filename, distanceAlongRouteMeters, bankSide, lateralOffsetMeters,
+  orientationDegrees, scale}` with `modelId = r-<courseId>-<slug>` and
+  `bankSide` in `left|right|centre`, distance clamped onto the route; and
+  `report.json` with the model id, seed, llm-cad git SHA, per-GLB raw and
+  gzipped bytes, and every per-model failure. Writes go through
+  `cad_mcp.paths.safe_output_path`.
+- H5: **Size.** Tessellation scales with the model's bounding-box diagonal
+  (scenery is metres across). A GLB over 500 KB gzipped is retried once
+  at a coarser tolerance, then reported as a failure and not written.
+- H6: **Exit codes.** `0`: at least one GLB written. `1`: nothing usable
+  (`report.json` says why). `2`: could not start (missing key, unreadable
+  course, bad arguments), and nothing is written.
+- H7: **Determinism.** Given the same model replies, all outputs are
+  byte-identical across runs (N4 for the GLBs; rounded floats, fixed JSON
+  formatting and no timestamps or paths for the JSON). Provider-side
+  sampling with a pinned model and seed is best effort.
+
+Tests: `tests/test_generate_course.py`, with the model stubbed.
+
 ## 11. v2+ backlog
 Parametric "tweak sliders" resource · STEP import + modify · multi-material 3MF · image-to-3D via Meshy `v1/image-to-3d` · undo/redo per part · assembly constraints solver (mate, align, offset).
