@@ -189,6 +189,31 @@ guaranteed.
 | `cad://session/current/code` | Current model source code |
 | `cad://examples/{name}` | Curated examples: bracket, enclosure, flange, pipe_clamp, phone_stand, threaded_cap, gear, desk_organizer |
 
+## Headless course generation
+
+`llm-cad generate-course` builds scenery for one rownative course with no MCP
+host in the loop. virtualrow's monthly scenery workflow calls it from GitHub
+Actions.
+
+```bash
+export LLM_CAD_MODEL_API_KEY=...        # required; never printed
+uv run llm-cad generate-course \
+  --course-json course-1.json --out out/ \
+  [--model anthropic/claude-sonnet-5] [--seed 0] [--max-models 3]
+```
+
+It writes `<slug>.glb` per model (each at most 500 KB gzipped, every part
+flat-coloured from virtualrow's scenery palette, with defaults by part name and
+role when the model gives no colour), `placements.json`
+(`modelId`, `filename`, `distanceAlongRouteMeters`, `bankSide`,
+`lateralOffsetMeters`, `orientationDegrees`, `scale`) and `report.json` (model,
+seed, llm-cad git SHA, per-GLB sizes, failures). The exit code is 0 when at
+least one GLB was written, 1 when nothing usable came out, and 2 when the run
+could not start (for example no API key), in which case nothing is written.
+The model is called through an OpenAI-compatible `/chat/completions` endpoint,
+OpenRouter by default; set `LLM_CAD_MODEL_BASE_URL` to use another. With the
+same model replies the output is byte-identical; see SPEC §10.5.
+
 ## Development
 
 ```bash

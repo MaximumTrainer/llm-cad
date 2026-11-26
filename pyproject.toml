@@ -56,6 +56,8 @@ gpu = [
 
 [project.scripts]
 cad-mcp = "cad_mcp.server:main"
+# Headless commands (SPEC 10.5), e.g. `llm-cad generate-course`.
+llm-cad = "cad_mcp.cli:entrypoint"
 
 [build-system]
 requires = ["hatchling"]
