@@ -15,6 +15,7 @@ Exit codes for ``generate-course``:
 * ``2`` -- the run could not start: bad arguments, no API key, an
   unreadable course file. Nothing is written.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,11 +25,16 @@ from pathlib import Path
 
 from cad_mcp import course_gen
 from cad_mcp.llm_client import (
+    ANTHROPIC_DEFAULT_MODEL,
     API_KEY_ENV,
     DEFAULT_MODEL,
+    PROVIDER_ANTHROPIC,
+    AnthropicClient,
     ModelClient,
     OpenAICompatibleClient,
     api_key_from_env,
+    default_model_for,
+    provider_for,
 )
 
 EXIT_OK = 0
@@ -61,31 +67,46 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     gen.add_argument(
-        "--course-json", required=True, type=Path, metavar="PATH",
+        "--course-json",
+        required=True,
+        type=Path,
+        metavar="PATH",
         help="path to the rownative course JSON",
     )
     gen.add_argument(
-        "--out", required=True, type=Path, metavar="DIR",
+        "--out",
+        required=True,
+        type=Path,
+        metavar="DIR",
         help="directory to write <slug>.glb, placements.json and report.json",
     )
     gen.add_argument(
-        "--model", default=DEFAULT_MODEL, metavar="ID",
-        help=f"model id for the chat-completions API (default: {DEFAULT_MODEL})",
+        "--model",
+        default=None,
+        metavar="ID",
+        help=(
+            f"model id (default: {ANTHROPIC_DEFAULT_MODEL} with an Anthropic key, "
+            f"else {DEFAULT_MODEL} via OpenRouter)"
+        ),
     )
     gen.add_argument(
-        "--seed", type=int, default=0, metavar="INT",
+        "--seed",
+        type=int,
+        default=0,
+        metavar="INT",
         help="sampling seed passed to the model (default: 0)",
     )
     gen.add_argument(
-        "--max-models", type=_positive_int, default=3, metavar="N",
+        "--max-models",
+        type=_positive_int,
+        default=3,
+        metavar="N",
         help="most models to generate (default: 3)",
     )
     return parser
 
 
-def generate_course(
-    args: argparse.Namespace, client: ModelClient | None = None
-) -> int:
+def generate_course(args: argparse.Namespace, client: ModelClient | None = None) -> int:
     if client is None:
         key = api_key_from_env()
         if key is None:
@@ -95,7 +116,20 @@ def generate_course(
                 file=sys.stderr,
             )
             return EXIT_USAGE
-        client = OpenAICompatibleClient(key)
+        try:
+            provider = provider_for(key)
+        except ValueError as exc:
+            print(f"llm-cad: {exc}. Nothing was written.", file=sys.stderr)
+            return EXIT_USAGE
+        client = (
+            AnthropicClient(key)
+            if provider == PROVIDER_ANTHROPIC
+            else OpenAICompatibleClient(key)
+        )
+        if args.model is None:
+            args.model = default_model_for(provider)
+    elif args.model is None:
+        args.model = DEFAULT_MODEL
 
     try:
         course = course_gen.load_course(args.course_json)

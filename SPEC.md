@@ -352,11 +352,16 @@ llm-cad generate-course --course-json <path> --out <dir> [--model <id>] [--seed 
 
 - H1: **Input.** The caller supplies the course file; nothing but the
   model call touches the network.
-- H2: **Model.** One OpenAI-compatible `/chat/completions` call returns a
-  JSON plan of at most `--max-models` objects (code + placement), sent
-  with `temperature=0` and `seed`. Base URL from `LLM_CAD_MODEL_BASE_URL`
-  (default OpenRouter). The key is read from `LLM_CAD_MODEL_API_KEY`, sent
-  only in the `Authorization` header, and never printed or written.
+- H2: **Model.** One call returns a JSON plan of at most `--max-models`
+  objects (code + placement). The key is read from `LLM_CAD_MODEL_API_KEY`,
+  sent only in the request's auth header, and never printed or written.
+  An Anthropic key (`sk-ant-`, or `LLM_CAD_MODEL_PROVIDER=anthropic`) calls
+  the Anthropic Messages API through the official `anthropic` SDK (default
+  model `claude-opus-5-5`, adaptive thinking at `high` effort, server-side
+  fallback on a policy decline; the API takes no `seed`). Any other key
+  makes an OpenAI-compatible `/chat/completions` call with `temperature=0`
+  and `seed`, base URL from `LLM_CAD_MODEL_BASE_URL` (default OpenRouter,
+  model `anthropic/claude-sonnet-5`).
 - H3: **Execution.** Every model's code runs through `sandbox.py`, exactly
   as `execute_cad` does (§7). A failure gets one repair call carrying the
   structured error; a second failure fails that model only.
