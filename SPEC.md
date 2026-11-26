@@ -377,6 +377,16 @@ llm-cad generate-course --course-json <path> --out <dir> [--model <id>] [--seed 
   byte-identical across runs (N4 for the GLBs; rounded floats, fixed JSON
   formatting and no timestamps or paths for the JSON). Provider-side
   sampling with a pinned model and seed is best effort.
+- H8: **Colour.** Every model is one or more parts, and every part is
+  exported as its own GLB mesh with a flat PBR `baseColorFactor` (no
+  textures, metallic 0, roughness 1), matching virtualrow's scenery kit.
+  A part's colour is the model's `#RRGGBB` when valid, else the first
+  palette keyword in the part's name ("roof", "reeds", "parapet" ...),
+  else the model's role default (hero landmark: clapboard `#C9BFA8`, bank
+  material: grass `#5E8A46`, backdrop: foliage `#3E6B32`), else concrete
+  `#B5B0A6`. The palette is virtualrow's (`src/cad_mcp/scenery_palette.py`),
+  it is offered to the model in the prompt, and `report.json` records each
+  part's colour and which rule chose it. No part is exported uncoloured.
 
 Tests: `tests/test_generate_course.py`, with the model stubbed.
 

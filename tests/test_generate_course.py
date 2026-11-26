@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 import pytest
 
-from cad_mcp import cli, course_gen
+from cad_mcp import cli, course_gen, scenery_palette
 from cad_mcp.llm_client import (
     API_KEY_ENV,
     Message,
@@ -26,14 +26,18 @@ from cad_mcp.llm_client import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "rownative-course-1.json"
 
-BOATHOUSE = """\
-body = cq.Workplane("XY").box(12000, 8000, 6000).translate((0, 0, 3000))
-roof = (
+BOATHOUSE_WALLS = (
+    'result = cq.Workplane("XY").box(12000, 8000, 6000).translate((0, 0, 3000))\n'
+)
+BOATHOUSE_ROOF = """\
+result = (
     cq.Workplane("YZ").polyline([(-4200, 6000), (4200, 6000), (0, 8500)])
     .close().extrude(12400).translate((-6200, 0, 0))
 )
-result = body.union(roof)
 """
+BOATHOUSE_DOORS = (
+    'result = cq.Workplane("XY").box(8000, 100, 3000).translate((0, 4050, 1500))\n'
+)
 
 REEDS = """\
 result = cq.Workplane("XY")
@@ -55,7 +59,13 @@ PLAN = {
             "slug": "Lake Quinsig Boathouse",
             "role": "hero-landmark",
             "description": "Two-storey clapboard boathouse.",
-            "code": BOATHOUSE,
+            "parts": [
+                # A colour from the model, in lower case and without '#'.
+                {"name": "walls", "colour": "c9bfa8", "code": BOATHOUSE_WALLS},
+                {"name": "roof", "colour": "#4A3F35", "code": BOATHOUSE_ROOF},
+                # No colour: the part name picks the palette entry.
+                {"name": "boat bay doors", "code": BOATHOUSE_DOORS},
+            ],
             "placement": {
                 "distanceAlongRouteMeters": 1500,
                 "bankSide": "right",
@@ -68,6 +78,7 @@ PLAN = {
             "slug": "reed-bank",
             "role": "bank-material",
             "description": "A clump of reeds.",
+            "colour": "not-a-colour",  # invalid: falls back to the name
             "code": REEDS,
             "placement": {
                 "distanceAlongRouteMeters": 99999,  # clamped to the route
@@ -221,6 +232,40 @@ def test_normalise_placement_clamps_and_rejects() -> None:
             course_gen.normalise_placement(bad, None)
 
 
+def test_every_part_gets_a_colour() -> None:
+    resolve = scenery_palette.resolve_colour
+    assert resolve("#4a3f35", "roof", "backdrop") == ("#4A3F35", "model")
+    assert resolve(None, "front-windows", "") == ("#2A3A44", "part-name")
+    assert resolve("red", "upper-roof", "") == ("#4A3F35", "part-name")
+    assert resolve(None, "thing", "bank-material") == ("#5E8A46", "role")
+    assert resolve(None, "thing", "Hero-Landmark") == ("#C9BFA8", "role")
+    assert resolve(None, "thing", "mystery") == (
+        scenery_palette.FALLBACK_COLOUR,
+        "fallback",
+    )
+    assert scenery_palette.rgba("#FF0000") == [1.0, 0.0, 0.0, 1.0]
+
+
+def test_single_code_model_becomes_one_coloured_part() -> None:
+    plans = course_gen.parse_plan(json.dumps(PLAN), 3)
+    boathouse, reeds, hills = plans
+    assert [(p.name, p.colour, p.colour_source) for p in boathouse.parts] == [
+        ("walls", "#C9BFA8", "model"),
+        ("roof", "#4A3F35", "model"),
+        ("boat-bay-doors", "#241E18", "part-name"),
+    ]
+    assert [(p.name, p.colour_source) for p in reeds.parts] == [
+        ("reed-bank", "part-name")
+    ]
+    assert reeds.parts[0].colour == "#A89A6E"
+    assert hills.parts[0].colour == "#3E6B32"
+
+
+def test_system_prompt_offers_the_palette() -> None:
+    assert "#4A3F35" in course_gen.SYSTEM_PROMPT
+    assert "{palette}" not in course_gen.SYSTEM_PROMPT
+
+
 def test_http_client_sends_seed_and_never_leaks_the_key() -> None:
     seen: list[httpx.Request] = []
 
@@ -266,6 +311,22 @@ _PLACEMENT_KEYS = {
 }
 
 
+def _glb_colours(path: Path) -> dict[str, str]:
+    """Part name -> #RRGGBB read back from the GLB's JSON chunk."""
+    data = path.read_bytes()
+    length = int.from_bytes(data[12:16], "little")
+    gltf = json.loads(data[20 : 20 + length])
+    colours: dict[str, str] = {}
+    for mesh in gltf["meshes"]:
+        for prim in mesh["primitives"]:
+            pbr = gltf["materials"][prim["material"]]["pbrMetallicRoughness"]
+            r, g, b, _ = pbr["baseColorFactor"]
+            colours[mesh["name"]] = "#{:02X}{:02X}{:02X}".format(
+                *(round(c * 255) for c in (r, g, b))
+            )
+    return colours
+
+
 @pytest.fixture(scope="module")
 def two_runs(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, StubClient]:
     base = tmp_path_factory.mktemp("generate-course")
@@ -295,6 +356,13 @@ def test_writes_glbs_placements_and_report(
         assert data[:4] == b"glTF"
         assert len(gzip.compress(data, mtime=0)) <= course_gen.GZIP_CAP_BYTES
 
+    # Every mesh in every GLB carries a flat colour, and it is the one the
+    # report says was chosen.
+    report = json.loads((out / "report.json").read_text())
+    for m in report["models"]:
+        expected = {p["name"]: p["colour"] for p in m["parts"]}
+        assert _glb_colours(out / m["filename"]) == expected
+
     placements = json.loads((out / "placements.json").read_text())
     assert isinstance(placements, list) and len(placements) == 3
     for entry in placements:
@@ -310,7 +378,6 @@ def test_writes_glbs_placements_and_report(
     assert by_id["r-1-reed-bank"]["distanceAlongRouteMeters"] == 5306.0
     assert by_id["r-1-hills"]["bankSide"] == "centre"
 
-    report = json.loads((out / "report.json").read_text())
     assert report["model"] == "stub/model-1"
     assert report["seed"] == 7
     assert report["llmCadSha"]

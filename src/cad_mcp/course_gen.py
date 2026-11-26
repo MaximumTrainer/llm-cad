@@ -13,7 +13,9 @@ no MCP host in the loop:
 3. run each model's code through :mod:`cad_mcp.sandbox` -- the same
    sandbox ``execute_cad`` uses, never ``exec()`` -- giving a failed
    model one repair round with the structured error;
-4. tessellate to GLB at a tolerance scaled to the model's size (scenery
+4. colour every part (the model's hex, else a palette default from the
+   part's name or the model's role -- see :mod:`cad_mcp.scenery_palette`)
+   and tessellate to GLB at a tolerance scaled to the model's size (scenery
    is metres across, and the 0.1 mm export tolerance would produce
    millions of triangles), coarsening once if the gzipped size is over
    the 500 KB cap;
@@ -38,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cad_mcp import sandbox
+from cad_mcp import sandbox, scenery_palette
 from cad_mcp.llm_client import Message, ModelClient, ModelError
 from cad_mcp.paths import safe_output_path
 
@@ -62,10 +64,12 @@ _FENCE_RE = re.compile(r"```(?:json|python)?\s*(.*?)```", re.DOTALL)
 SYSTEM_PROMPT = """\
 You design scenery for a virtual rowing simulator using CadQuery.
 
-Each model you write is Python that runs in a sandbox with `cadquery`
-(also `cq`), `math` and `numpy` pre-imported, and MUST assign the final
-shape to a variable named `result`. No imports beyond those, no file or
-network access.
+Each model is made of one or more coloured parts. Each part's code is
+Python that runs in its own sandbox with `cadquery` (also `cq`), `math`
+and `numpy` pre-imported, and MUST assign that part's shape to a variable
+named `result`. No imports beyond those, no file or network access. All
+parts of a model share one coordinate frame, so position each part where
+it belongs in the model.
 
 Conventions every model must follow:
 - Units are millimetres (a 12 m boathouse is 12000 mm wide).
@@ -75,13 +79,21 @@ Conventions every model must follow:
   extrusions. No fillets, no text, no lofts over many sections. The
   exported mesh must stay small.
 - Largest dimension at most 60 000 mm.
+- Colour is flat, one #RRGGBB per part, no textures: split a model into
+  parts wherever the real thing changes material (walls, roof, windows,
+  doors; deck, railings; trunk, foliage). Prefer this palette so models
+  match the existing scenery: {palette}.
 
 Reply with one JSON object and nothing else, in this shape:
 {"models": [{
   "slug": "short-kebab-name",
   "role": "hero-landmark" | "bank-material" | "backdrop",
   "description": "one sentence",
-  "code": "CadQuery source assigning result",
+  "parts": [{
+    "name": "roof",
+    "colour": "#4A3F35",
+    "code": "CadQuery source assigning result"
+  }],
   "placement": {
     "distanceAlongRouteMeters": number,
     "bankSide": "left" | "right" | "centre",
@@ -90,7 +102,7 @@ Reply with one JSON object and nothing else, in this shape:
     "scale": number
   }
 }]}
-"""
+""".replace("{palette}", scenery_palette.palette_prompt())
 
 
 class CourseError(ValueError):
@@ -109,11 +121,19 @@ class Course:
 
 
 @dataclass
+class PartPlan:
+    name: str
+    colour: str
+    colour_source: str
+    code: str
+
+
+@dataclass
 class ModelPlan:
     slug: str
     role: str
     description: str
-    code: str
+    parts: list[PartPlan]
     placement: dict[str, Any]
 
 
@@ -130,6 +150,7 @@ class Outcome:
     repaired: bool = False
     error: str | None = None
     placement: dict[str, Any] | None = None
+    parts: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -271,18 +292,59 @@ def parse_plan(reply: str, max_models: int) -> list[ModelPlan]:
             n += 1
         seen.add(slug)
         placement = entry.get("placement")
+        role = str(entry.get("role") or "").strip()
         plans.append(
             ModelPlan(
                 slug=slug,
-                role=str(entry.get("role") or "").strip(),
+                role=role,
                 description=str(entry.get("description") or "").strip(),
-                code=str(entry.get("code") or ""),
+                parts=_parse_parts(entry, slug, role),
                 placement=placement if isinstance(placement, dict) else {},
             )
         )
     if not plans:
         raise ModelError("model reply had no usable model entries")
     return plans
+
+
+def _parse_parts(entry: dict[str, Any], slug: str, role: str) -> list[PartPlan]:
+    """The model's parts, each with a resolved colour.
+
+    A model given as a single ``code`` (no ``parts``) is one part named
+    after the model, coloured from a top-level ``colour`` if present.
+    """
+    raw_parts = entry.get("parts")
+    if not isinstance(raw_parts, list) or not raw_parts:
+        raw_parts = [
+            {
+                "name": slug,
+                "colour": entry.get("colour", entry.get("color")),
+                "code": entry.get("code"),
+            }
+        ]
+    parts: list[PartPlan] = []
+    seen: set[str] = set()
+    for i, raw in enumerate(raw_parts):
+        if not isinstance(raw, dict):
+            continue
+        base = slugify(str(raw.get("name") or f"part-{i + 1}"))
+        name, n = base, 2
+        while name in seen:
+            name = f"{base}-{n}"
+            n += 1
+        seen.add(name)
+        colour, source = scenery_palette.resolve_colour(
+            raw.get("colour", raw.get("color")), name, role
+        )
+        parts.append(
+            PartPlan(
+                name=name,
+                colour=colour,
+                colour_source=source,
+                code=str(raw.get("code") or ""),
+            )
+        )
+    return parts
 
 
 def normalise_placement(
@@ -338,24 +400,64 @@ def _r(value: float) -> float:
 # ----------------------------------------------------------------------
 
 
-def _glb_for(brep: Path, bbox: dict[str, float] | None, out: Path) -> tuple[int, int]:
-    """Export *brep* to *out*; return (raw bytes, gzipped bytes).
+_Part = tuple[str, Path, str]  # (name, brep, #RRGGBB)
 
-    Tries each tessellation step in turn and keeps the first GLB under
-    the cap. Raises ``ValueError`` when even the coarsest is too big.
+
+def _union_diagonal(bboxes: list[dict[str, float] | None]) -> float:
+    boxes = [b for b in bboxes if b]
+    if not boxes:
+        return 1000.0
+    lo = [min(b[f"{a}min"] for b in boxes) for a in "xyz"]
+    hi = [max(b[f"{a}max"] for b in boxes) for a in "xyz"]
+    return math.dist(lo, hi)
+
+
+def _write_coloured_glb(
+    parts: list[_Part], out: Path, linear: float
+) -> None:
+    """One mesh per part, each with a flat PBR ``baseColorFactor``.
+
+    The same shape as virtualrow's kit GLBs: no textures, one material
+    per part, fully rough and non-metallic so the scene's lighting does
+    the shading.
     """
-    from cad_mcp.export import export_glb
+    import trimesh
+    from trimesh.visual.material import PBRMaterial
+    from trimesh.visual.texture import TextureVisuals
 
-    diagonal = 1000.0
-    if bbox:
-        diagonal = math.dist(
-            (bbox["xmin"], bbox["ymin"], bbox["zmin"]),
-            (bbox["xmax"], bbox["ymax"], bbox["zmax"]),
+    from cad_mcp.render import load_and_tessellate
+
+    scene = trimesh.Scene()
+    for name, brep, colour in parts:
+        verts, faces = load_and_tessellate(brep, linear, _TESS_ANGULAR_RAD)
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+        mesh.fix_normals()
+        mesh.visual = TextureVisuals(
+            material=PBRMaterial(
+                name=name,
+                baseColorFactor=scenery_palette.rgba(colour),
+                metallicFactor=0.0,
+                roughnessFactor=1.0,
+            )
         )
+        scene.add_geometry(mesh, geom_name=name, node_name=name)
+    out.write_bytes(scene.export(file_type="glb"))
+
+
+def _glb_for(
+    parts: list[_Part], bboxes: list[dict[str, float] | None], out: Path
+) -> tuple[int, int]:
+    """Export *parts* to one GLB at *out*; return (raw bytes, gzipped bytes).
+
+    Tessellation is relative to the whole model's size. Tries each step
+    in turn and keeps the first GLB under the cap; raises ``ValueError``
+    when even the coarsest is too big.
+    """
+    diagonal = _union_diagonal(bboxes)
     gz = 0
     for fraction in _TESS_STEPS:
         linear = max(diagonal * fraction, _TESS_MIN_LINEAR_MM)
-        export_glb(brep, out, tolerance=linear, angular_tolerance=_TESS_ANGULAR_RAD)
+        _write_coloured_glb(parts, out, linear)
         data = out.read_bytes()
         gz = len(gzip.compress(data, compresslevel=9, mtime=0))
         if gz <= GZIP_CAP_BYTES:
@@ -376,14 +478,15 @@ def _run_code(code: str, work: Path, brep: Path) -> sandbox.SandboxResult:
 
 
 def _repair_messages(
-    history: list[Message], plan: ModelPlan, failure: str
+    history: list[Message], plan: ModelPlan, part: PartPlan, failure: str
 ) -> list[Message]:
     return [
         *history,
         {
             "role": "user",
             "content": (
-                f"The code for '{plan.slug}' failed in the sandbox:\n{failure}\n\n"
+                f"The code for part '{part.name}' of '{plan.slug}' failed in "
+                f"the sandbox:\n{failure}\n\n"
                 'Reply with one JSON object {"code": "..."} holding the '
                 "corrected CadQuery source, and nothing else."
             ),
@@ -394,6 +497,37 @@ def _repair_messages(
 # ----------------------------------------------------------------------
 # Orchestration
 # ----------------------------------------------------------------------
+
+
+def _build_part(
+    client: ModelClient,
+    history: list[Message],
+    plan: ModelPlan,
+    part: PartPlan,
+    work: Path,
+    brep: Path,
+    model: str,
+    seed: int,
+) -> tuple[sandbox.SandboxResult, bool] | str:
+    """Run one part, with one repair round. Returns (result, repaired)
+    on success, or the error text for ``report.json``."""
+    run = _run_code(part.code, work, brep)
+    if run.ok:
+        return run, False
+    try:
+        fix = client.complete(
+            _repair_messages(history, plan, part, run.format_for_llm()),
+            model=model,
+            seed=seed,
+        )
+        fixed = _json_from_reply(fix)
+    except ModelError as exc:
+        return f"RepairFailed ({part.name}): {exc}"
+    code = fixed.get("code") if isinstance(fixed, dict) else None
+    run = _run_code(str(code or ""), work, brep)
+    if not run.ok:
+        return f"{part.name}: {run.format_for_llm()}"
+    return run, True
 
 
 def llm_cad_sha() -> str:
@@ -464,30 +598,31 @@ def generate(
                 outcome.error = f"InvalidPlacement: {exc}"
                 continue
 
-            brep = work / f"{plan.slug}.brep"
-            run = _run_code(plan.code, work, brep)
-            if not run.ok:
-                try:
-                    fix = client.complete(
-                        _repair_messages(history, plan, run.format_for_llm()),
-                        model=model,
-                        seed=seed,
-                    )
-                    fixed = _json_from_reply(fix)
-                    code = fixed.get("code") if isinstance(fixed, dict) else None
-                    run = _run_code(str(code or ""), work, brep)
-                    outcome.repaired = True
-                except ModelError as exc:
-                    outcome.error = f"RepairFailed: {exc}"
-                    continue
-            if not run.ok:
-                outcome.error = run.format_for_llm()
+            outcome.parts = [
+                {"name": p.name, "colour": p.colour, "colourSource": p.colour_source}
+                for p in plan.parts
+            ]
+            if not plan.parts:
+                outcome.error = "NoParts: the model entry had no usable parts"
+                continue
+            built: list[_Part] = []
+            bboxes: list[dict[str, float] | None] = []
+            for i, part in enumerate(plan.parts):
+                brep = work / f"{plan.slug}--{i}.brep"
+                run = _build_part(client, history, plan, part, work, brep, model, seed)
+                if isinstance(run, str):
+                    outcome.error = run
+                    break
+                outcome.repaired |= run[1]
+                built.append((part.name, brep, part.colour))
+                bboxes.append(run[0].bbox)
+            if outcome.error:
                 continue
 
             filename = f"{plan.slug}.glb"
             glb = work / filename
             try:
-                raw, gz = _glb_for(brep, run.bbox, glb)
+                raw, gz = _glb_for(built, bboxes, glb)
             except ValueError as exc:
                 outcome.error = f"SizeCapExceeded: {exc}"
                 continue
@@ -537,6 +672,7 @@ def _write_outputs(
                 "glbBytes": o.glb_bytes,
                 "glbGzipBytes": o.glb_gzip_bytes,
                 "repaired": o.repaired,
+                "parts": o.parts,
                 "error": o.error,
             }
             for o in result.outcomes

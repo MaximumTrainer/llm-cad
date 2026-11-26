@@ -202,7 +202,9 @@ uv run llm-cad generate-course \
   [--model anthropic/claude-sonnet-5] [--seed 0] [--max-models 3]
 ```
 
-It writes `<slug>.glb` per model (each at most 500 KB gzipped), `placements.json`
+It writes `<slug>.glb` per model (each at most 500 KB gzipped, every part
+flat-coloured from virtualrow's scenery palette, with defaults by part name and
+role when the model gives no colour), `placements.json`
 (`modelId`, `filename`, `distanceAlongRouteMeters`, `bankSide`,
 `lateralOffsetMeters`, `orientationDegrees`, `scale`) and `report.json` (model,
 seed, llm-cad git SHA, per-GLB sizes, failures). The exit code is 0 when at
