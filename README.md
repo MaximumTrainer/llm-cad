@@ -199,7 +199,7 @@ Actions.
 export LLM_CAD_MODEL_API_KEY=...        # required; never printed
 uv run llm-cad generate-course \
   --course-json course-1.json --out out/ \
-  [--model anthropic/claude-sonnet-5] [--seed 0] [--max-models 3]
+  [--model <id>] [--seed 0] [--max-models 3]
 ```
 
 It writes `<slug>.glb` per model (each at most 500 KB gzipped, every part
@@ -210,9 +210,12 @@ role when the model gives no colour), `placements.json`
 seed, llm-cad git SHA, per-GLB sizes, failures). The exit code is 0 when at
 least one GLB was written, 1 when nothing usable came out, and 2 when the run
 could not start (for example no API key), in which case nothing is written.
-The model is called through an OpenAI-compatible `/chat/completions` endpoint,
-OpenRouter by default; set `LLM_CAD_MODEL_BASE_URL` to use another. With the
-same model replies the output is byte-identical; see SPEC §10.5.
+The key picks the provider. An Anthropic key (`sk-ant-...`) calls Claude
+through the Anthropic Messages API, `claude-opus-5-5` by default. Any other key
+calls an OpenAI-compatible `/chat/completions` endpoint, OpenRouter by default
+(`anthropic/claude-sonnet-5`); set `LLM_CAD_MODEL_BASE_URL` to use another.
+`LLM_CAD_MODEL_PROVIDER=anthropic|openai-compatible` overrides the choice. With
+the same model replies the output is byte-identical; see SPEC §10.5.
 
 ## Development
 
